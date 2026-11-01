@@ -154,9 +154,29 @@ LearnOT/
 
 ---
 
-## 5. Quick-Start & Daily Commands (`uv`)
+## 5. OpenAlgo Setup & Daily Commands (`uv`)
 
-### A. First-Time Setup (One Time Only)
+### Step 0: Install & Connect OpenAlgo ([https://openalgo.in/](https://openalgo.in/))
+If you are setting up **OpenAlgo** ([GitHub](https://github.com/marketcalls/openalgo) | [Docs](https://docs.openalgo.in/)) for the first time:
+1. Clone OpenAlgo in a separate directory and create its `.env`:
+   ```bash
+   git clone https://github.com/marketcalls/openalgo.git
+   cd openalgo
+   cp .sample.env .env
+   ```
+2. Add your broker API credentials (e.g., from [Zerodha Kite Connect](https://developers.kite.trade/)) inside `openalgo/.env`:
+   ```ini
+   BROKER_API_KEY=your_zerodha_kite_api_key
+   BROKER_API_SECRET=your_zerodha_kite_api_secret
+   REDIRECT_URL=http://127.0.0.1:5000/zerodha/callback
+   ```
+3. Start OpenAlgo:
+   ```bash
+   uv run app.py
+   ```
+4. Open **`http://127.0.0.1:5000`**, log in with your broker, switch **Analyze Mode = ON** (safe simulator mode), and copy your **API Key** from **`http://127.0.0.1:5000/apikey`**.
+
+### A. First-Time LearnOT Setup (One Time Only)
 1. Copy `.env.example` to `.env`:
    ```bash
    cp .env.example .env

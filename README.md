@@ -73,15 +73,63 @@ LearnOT/
 
 ---
 
-## Quick Start (Using `uv`)
+## Prerequisite: How to Setup OpenAlgo ([https://openalgo.in/](https://openalgo.in/))
 
-### 1. Setup Your `.env` File (Protected by `.gitignore`)
-Copy the example environment file:
+**LearnOT** uses **[OpenAlgo](https://openalgo.in/)** ([GitHub](https://github.com/marketcalls/openalgo) | [Official Docs](https://docs.openalgo.in/)) as its local API gateway (`http://127.0.0.1:5000`) to fetch live Option Chains, Greeks, and Synthetic Futures and to place simulated/live orders via **Zerodha** (or any of the 20+ Indian brokers supported by OpenAlgo such as Dhan, AngelOne, Fyers, Upstox, Flattrade, Shoonya).
+
+> **Note:** Even if you don't have OpenAlgo installed yet, you can still run LearnOT immediately in **Practice Simulator (`--demo`) Mode**! Follow the steps below when you are ready to connect live market data.
+
+### Step 1: Install `uv` (Fast Python Package Manager)
 ```bash
+# macOS / Linux:
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Windows (PowerShell):
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+```
+
+### Step 2: Clone & Install OpenAlgo (In a Separate Folder)
+```bash
+git clone https://github.com/marketcalls/openalgo.git
+cd openalgo
+cp .sample.env .env
+```
+
+### Step 3: Connect Your Broker (e.g., Zerodha Kite Connect) in OpenAlgo's `.env`
+1. Create a developer app on [Zerodha Kite Connect (`developers.kite.trade`)](https://developers.kite.trade/) (or your preferred broker's API portal).
+2. Set the **Redirect URL** in your broker portal to:
+   ```text
+   http://127.0.0.1:5000/zerodha/callback
+   ```
+3. Open `openalgo/.env` and fill in your broker credentials:
+   ```ini
+   BROKER_API_KEY=your_zerodha_kite_api_key
+   BROKER_API_SECRET=your_zerodha_kite_api_secret
+   REDIRECT_URL=http://127.0.0.1:5000/zerodha/callback
+   ```
+
+### Step 4: Launch OpenAlgo & Get Your `OPENALGO_API_KEY`
+1. Start the OpenAlgo server:
+   ```bash
+   uv run app.py
+   ```
+2. Open **`http://127.0.0.1:5000`** in your browser, create your local OpenAlgo admin account, and click **Login with Broker** to authenticate with Zerodha for the day.
+3. Toggle **Analyze Mode = ON** in the OpenAlgo navbar (this keeps OpenAlgo in safe **Paper/Simulator Mode** so no real money is risked while practicing).
+4. Navigate to **`http://127.0.0.1:5000/apikey`** (or **Settings → API Key**), generate your **OpenAlgo API Key**, and copy it for the next section!
+
+---
+
+## Quick Start: Running LearnOT (Using `uv`)
+
+### 1. Clone LearnOT & Configure Your `.env` File (Protected by `.gitignore`)
+```bash
+git clone https://github.com/RangasamyArran/LearnOT.git
+cd LearnOT
 cp .env.example .env
 ```
 Edit `.env` and fill in your credentials *(Note: `.env` is listed in [`.gitignore`](.gitignore) so your API keys and passwords will **never** be committed to Git)*:
-* `OPENALGO_API_KEY`: Your API key from `http://127.0.0.1:5000/apikey`
+* `OPENALGO_HOST=http://127.0.0.1:5000`
+* `OPENALGO_API_KEY`: Paste the API key you copied from `http://127.0.0.1:5000/apikey`
 * `GMAIL_USER`: Your Gmail address (`your_email@gmail.com`)
 * `GMAIL_APP_PASSWORD`: Your 16-character Google App Password from [myaccount.google.com/apppasswords](https://myaccount.google.com/apppasswords)
 
@@ -89,15 +137,16 @@ Edit `.env` and fill in your credentials *(Note: `.env` is listed in [`.gitignor
 ```bash
 uv run dashboard_ui.py --port 8080
 ```
-Open **`http://127.0.0.1:8080`** in your browser.
-* Use **Practice Simulator (Demo)** mode 24/7 (even on weekends/nights) to step through scenarios.
+Open **`http://127.0.0.1:8080`** in your browser:
+* Use **Practice Simulator (Demo)** mode 24/7 (even on weekends/nights) to step through scenarios without needing OpenAlgo running.
 * Switch to **Live OpenAlgo (`127.0.0.1:5000`)** during market hours (`09:15 AM – 03:30 PM IST`) with **Auto-Poll set to `180s (3m NSE OI Cycle ★)`**.
 
 ### 3. Run From Terminal (CLI)
 ```bash
-# Run 3-step Trapped-Seller Simulation + Gmail Alert + Journal Test (works 24/7):
+# Run 3-step Trapped-Seller Simulation + Gmail Alert + Journal Test (works 24/7 without OpenAlgo):
 uv run option_chain_analyzer.py --test-email
 
 # Run Live 3-Minute Option Chain Analyzer during market hours (09:15 AM - 03:30 PM IST):
 uv run option_chain_analyzer.py --underlying NIFTY --interval 180 --auto-paper
 ```
+
