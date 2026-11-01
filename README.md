@@ -62,11 +62,13 @@ LearnOT/
 ├── .env.example                        # Safe template for OpenAlgo API Key & Gmail App Password
 ├── .gitignore                          # Protects .env secrets and local SQLite .db files from Git
 └── doc/
-    ├── HOW_IT_WORKS.md                 # Detailed architecture & step-by-step workflow explanation
-    ├── TRADING_JOURNAL.md              # Auto-updated Daily Trading & Fine-Tuning Journal (>= 3/6 setups)
-    └── trading_journal.csv             # CSV export for Excel / Pandas fine-tuning analysis
+    ├── PRE_MARKET_CHECKLIST_AND_PLAN.md # Daily Pre-Market Checklist & Trapped Overnight Writer Plan (08:55–09:15 AM)
+    ├── HOW_IT_WORKS.md                  # Detailed architecture & step-by-step workflow explanation
+    ├── TRADING_JOURNAL.md               # Auto-updated Daily Trading & Fine-Tuning Journal (>= 3/6 setups)
+    └── trading_journal.csv              # CSV export for Excel / Pandas fine-tuning analysis
 ```
 
+* 🌅 **[Daily Pre-Market Checklist & Game Plan (`08:55 AM – 09:15 AM`)](doc/PRE_MARKET_CHECKLIST_AND_PLAN.md)**
 * 📖 **[Strategy Blueprint & Daily Rulebook](STRATEGY_BLUEPRINT_AND_RULEBOOK.md)**
 * ⚙️ **[How It Works — Full Architecture & Workflow Guide](doc/HOW_IT_WORKS.md)**
 * 📓 **[Daily Trading & Fine-Tuning Journal (`Score >= 3/6`)](doc/TRADING_JOURNAL.md)**
