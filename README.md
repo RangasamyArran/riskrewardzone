@@ -123,8 +123,8 @@ cp .sample.env .env
 
 ### 1. Clone LearnOT & Configure Your `.env` File (Protected by `.gitignore`)
 ```bash
-git clone https://github.com/RangasamyArran/LearnOT.git
-cd LearnOT
+git clone https://github.com/RangasamyArran/riskrewardzone.git
+cd riskrewardzone
 cp .env.example .env
 ```
 Edit `.env` and fill in your credentials *(Note: `.env` is listed in [`.gitignore`](.gitignore) so your API keys and passwords will **never** be committed to Git)*:
