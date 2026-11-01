@@ -1,0 +1,30 @@
+# Secrets & Environment Variables (NEVER commit .env!)
+.env
+.env.*
+!.env.example
+
+# SQLite Databases & Runtime Data
+data/*.db
+data/*.db-journal
+data/*.db-wal
+data/*.sqlite
+
+# Python Bytecode & Virtual Environments
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+ENV/
+.uv-cache/
+build/
+dist/
+*.egg-info/
+
+# macOS / Editor Files
+.DS_Store
+.AppleDouble
+.LSOverride
+.vscode/
+.idea/
+*.swp

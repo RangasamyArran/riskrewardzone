@@ -1,0 +1,1466 @@
+#!/usr/bin/env -S uv run
+# /// script
+# requires-python = ">=3.9"
+# dependencies = []
+# ///
+"""
+LearnOT - Interactive Web UI for Nifty & BankNifty Option Chain Analyzer
+Connected to OpenAlgo (http://127.0.0.1:5000) + Zerodha
+
+Zero external dependencies required! Uses Python's standard library HTTP server
+and shares the quantitative engine & SQLite store with `option_chain_analyzer.py`.
+
+Run with uv:
+    uv run dashboard_ui.py --port 8080
+Then open:
+    http://127.0.0.1:8080
+"""
+
+import argparse
+import datetime as dt
+import json
+import os
+import sys
+import time
+import urllib.parse
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+from option_chain_analyzer import (
+    BASE_DIR,
+    OpenAlgoGateway,
+    SnapshotStore,
+    WhatsAppNotifier,
+    analyze_option_chain,
+    check_indian_market_hours,
+    format_whatsapp_setup_message,
+    generate_demo_snapshots,
+)
+
+
+# ---------------------------------------------------------------------------
+# Application State Manager
+# ---------------------------------------------------------------------------
+
+class AnalyzerAppState:
+    """Manages live OpenAlgo polling (3-min NSE OI cycle), WhatsApp alerts, demo progression, and paper trades."""
+
+    def __init__(self) -> None:
+        self.host: str = os.getenv("OPENALGO_HOST", "http://127.0.0.1:5000")
+        self.api_key: str = os.getenv("OPENALGO_API_KEY", "")
+        if self.api_key == "your_openalgo_api_key_here":
+            self.api_key = ""
+
+        self.mode: str = "LIVE_OPENALGO" if self.api_key else "DEMO"
+        self.underlying: str = os.getenv("DEFAULT_UNDERLYING", "NIFTY")
+        self.exchange: str = os.getenv("DEFAULT_EXCHANGE", "NSE_INDEX")
+        self.strike_count: int = int(os.getenv("STRIKE_COUNT", "5"))
+
+        self.live_store = SnapshotStore(BASE_DIR / "data" / "learnot_option_chain.db")
+        self.demo_store = SnapshotStore(BASE_DIR / "data" / "ui_demo_snapshots.db")
+
+        self.demo_step_idx: int = 0
+        self.demo_scenarios: List[Any] = []
+        self.last_report: Optional[Dict[str, Any]] = None
+        self.last_error: Optional[str] = None
+        self.last_whatsapp_result: Optional[Dict[str, Any]] = None
+        self.analyze_mode: Optional[bool] = None
+
+        self._reset_demo(self.underlying)
+
+    def _reset_demo(self, underlying: str) -> None:
+        db_file = BASE_DIR / "data" / "ui_demo_snapshots.db"
+        try:
+            self.demo_store.conn.close()
+        except Exception:
+            pass
+        if db_file.exists():
+            db_file.unlink()
+        self.demo_store = SnapshotStore(db_file)
+        self.demo_scenarios = self._build_extended_demo(underlying)
+        self.demo_step_idx = 0
+        self.last_report = None
+        self.last_whatsapp_result = None
+
+    def _build_extended_demo(self, underlying: str) -> List[Any]:
+        """Build a 5-stage interactive practice scenario (3-min NSE OI intervals)."""
+        base_steps = list(generate_demo_snapshots(underlying))
+        base_ts = base_steps[-1][0]
+        expiry = base_steps[0][1]["expiry_date"]
+        strikes = [r["strike"] for r in base_steps[0][1]["chain"]]
+
+        # Scale strikes if BANKNIFTY is selected in demo
+        scale = 2.0 if underlying == "BANKNIFTY" else 1.0
+        if scale != 1.0:
+            strikes = [s * scale for s in strikes]
+            for _, c_resp, s_resp in base_steps:
+                c_resp["underlying_ltp"] = round(c_resp["underlying_ltp"] * scale, 2)
+                c_resp["atm_strike"] = c_resp["atm_strike"] * scale
+                s_resp["underlying_ltp"] = c_resp["underlying_ltp"]
+                s_resp["synthetic_future_price"] = round(s_resp["synthetic_future_price"] * scale, 2)
+                s_resp["atm_strike"] = c_resp["atm_strike"]
+                for row in c_resp["chain"]:
+                    row["strike"] = row["strike"] * scale
+                    row["ce"]["symbol"] = f"{underlying}{expiry}{int(row['strike'])}CE"
+                    row["pe"]["symbol"] = f"{underlying}{expiry}{int(row['strike'])}PE"
+                    row["ce"]["lotsize"] = 30
+                    row["pe"]["lotsize"] = 30
+
+        # Step 4 (+180s = 3 mins): Follow-through rally (Target 1 achieved on 24500 CE!)
+        step4_chain = json.loads(json.dumps(base_steps[-1][1]))
+        step4_synth = json.loads(json.dumps(base_steps[-1][2]))
+        step4_ts = base_ts + 180
+        step4_chain["underlying_ltp"] = round(24572.0 * scale, 2)
+        step4_synth["underlying_ltp"] = step4_chain["underlying_ltp"]
+        step4_synth["synthetic_future_price"] = round(24581.0 * scale, 2)
+        ce_ltps_4 = [226.0, 188.0, 159.5, 122.0, 91.0]
+        pe_ltps_4 = [32.0, 43.0, 58.0, 79.0, 106.0]
+        for i, row in enumerate(step4_chain["chain"]):
+            row["ce"]["ltp"] = ce_ltps_4[i]
+            row["pe"]["ltp"] = pe_ltps_4[i]
+            row["ce"]["oi"] = max(500000, row["ce"]["oi"] - 180000)
+            row["pe"]["oi"] = row["pe"]["oi"] + 320000
+            row["ce"]["volume"] = row["ce"]["volume"] + 650000
+            row["ce"]["implied_volatility"] = round(row["ce"]["implied_volatility"] + 0.4, 2)
+
+        # Step 5 (+360s = 6 mins): Mid-day Sideways Theta Trap (Straddle decays while both CE and PE OI increase)
+        step5_chain = json.loads(json.dumps(base_steps[0][1]))
+        step5_synth = json.loads(json.dumps(base_steps[0][2]))
+        step5_ts = base_ts + 360
+        step5_chain["underlying_ltp"] = round(24501.0 * scale, 2)
+        step5_synth["underlying_ltp"] = step5_chain["underlying_ltp"]
+        step5_synth["synthetic_future_price"] = round(24502.0 * scale, 2)
+        ce_ltps_5 = [158.0, 125.0, 96.0, 71.0, 50.0]
+        pe_ltps_5 = [52.0, 69.0, 91.0, 118.0, 151.0]
+        for i, row in enumerate(step5_chain["chain"]):
+            row["ce"]["ltp"] = ce_ltps_5[i]
+            row["pe"]["ltp"] = pe_ltps_5[i]
+            row["ce"]["oi"] = base_steps[0][1]["chain"][i]["ce"]["oi"] + 650000
+            row["pe"]["oi"] = base_steps[0][1]["chain"][i]["pe"]["oi"] + 640000
+            row["ce"]["volume"] = step4_chain["chain"][i]["ce"]["volume"] + 90000
+            row["pe"]["volume"] = step4_chain["chain"][i]["pe"]["volume"] + 90000
+            row["ce"]["implied_volatility"] = 12.1
+            row["pe"]["implied_volatility"] = 12.3
+
+        base_steps.append((step4_ts, step4_chain, step4_synth))
+        base_steps.append((step5_ts, step5_chain, step5_synth))
+        return base_steps
+
+    def get_active_store(self) -> SnapshotStore:
+        return self.demo_store if self.mode == "DEMO" else self.live_store
+
+    def step_or_poll(self, advance_demo: bool = False) -> Dict[str, Any]:
+        """Fetch latest snapshot from OpenAlgo or advance demo scenario."""
+        self.last_error = None
+        if self.mode == "DEMO":
+            if self.last_report is None:
+                ts, c_resp, s_resp = self.demo_scenarios[0]
+                self.demo_step_idx = 0
+                self.last_report = analyze_option_chain(
+                    store=self.demo_store,
+                    underlying=self.underlying,
+                    expiry_date=c_resp["expiry_date"],
+                    days_to_expiry=4,
+                    chain_resp=json.loads(json.dumps(c_resp)),
+                    synth_resp=json.loads(json.dumps(s_resp)),
+                    now_ts=ts,
+                )
+            elif advance_demo:
+                self.demo_step_idx = (self.demo_step_idx + 1) % len(self.demo_scenarios)
+                if self.demo_step_idx == 0:
+                    self._reset_demo(self.underlying)
+                ts, c_resp, s_resp = self.demo_scenarios[self.demo_step_idx]
+                self.last_report = analyze_option_chain(
+                    store=self.demo_store,
+                    underlying=self.underlying,
+                    expiry_date=c_resp["expiry_date"],
+                    days_to_expiry=4,
+                    chain_resp=json.loads(json.dumps(c_resp)),
+                    synth_resp=json.loads(json.dumps(s_resp)),
+                    now_ts=ts,
+                )
+            self._update_open_paper_trades(self.demo_store, self.last_report)
+            self._check_auto_whatsapp(self.demo_store, self.last_report)
+            return self._serialize_state(self.demo_store)
+
+        # LIVE_OPENALGO mode
+        is_open, mkt_reason = check_indian_market_hours()
+        if not is_open and self.last_report is not None:
+            self.last_error = f"{mkt_reason} — Live auto-polling paused so frozen closing quotes don't dilute your journal."
+            return self._serialize_state(self.live_store)
+
+        try:
+            gateway = OpenAlgoGateway(host=self.host, api_key=self.api_key)
+            status_resp = gateway.analyzer_status()
+            self.analyze_mode = bool((status_resp.get("data") or {}).get("analyze_mode", False))
+
+            nfo_exch = "BFO" if self.underlying == "SENSEX" else "NFO"
+            expiry_date, days_to_expiry = gateway.find_nearest_expiry(
+                self.underlying, exchange=nfo_exch
+            )
+            chain_resp = gateway.fetch_option_chain(
+                underlying=self.underlying,
+                expiry_date=expiry_date,
+                exchange=self.exchange,
+                strike_count=self.strike_count,
+                with_greeks=True,
+            )
+            synth_resp = gateway.fetch_synthetic_future(
+                underlying=self.underlying,
+                expiry_date=expiry_date,
+                exchange=self.exchange,
+            )
+            self.last_report = analyze_option_chain(
+                store=self.live_store,
+                underlying=self.underlying,
+                expiry_date=expiry_date,
+                days_to_expiry=days_to_expiry,
+                chain_resp=chain_resp,
+                synth_resp=synth_resp,
+            )
+            self._update_open_paper_trades(self.live_store, self.last_report)
+            self._check_auto_whatsapp(self.live_store, self.last_report)
+            if not is_open:
+                self.last_error = f"{mkt_reason} — Loaded closing snapshot once; 3m auto-polling paused until 09:15 AM."
+        except Exception as exc:
+            self.last_error = str(exc)
+            if self.last_report is None:
+                ts, c_resp, s_resp = self.demo_scenarios[0]
+                self.last_report = analyze_option_chain(
+                    store=self.demo_store,
+                    underlying=self.underlying,
+                    expiry_date=c_resp["expiry_date"],
+                    days_to_expiry=4,
+                    chain_resp=json.loads(json.dumps(c_resp)),
+                    synth_resp=json.loads(json.dumps(s_resp)),
+                    now_ts=ts,
+                )
+        return self._serialize_state(self.get_active_store())
+
+    def _check_auto_whatsapp(
+        self, store: SnapshotStore, report: Optional[Dict[str, Any]]
+    ) -> None:
+        if not report:
+            return
+        sig = report.get("signals") or {}
+        if sig.get("action") in ("BUY_ATM_CE", "BUY_ATM_PE"):
+            notifier = WhatsAppNotifier(store)
+            self.last_whatsapp_result = notifier.notify_setup(report, force=False)
+
+    def send_manual_whatsapp(self) -> Dict[str, Any]:
+        if not self.last_report:
+            self.step_or_poll(advance_demo=False)
+        store = self.get_active_store()
+        notifier = WhatsAppNotifier(store)
+        assert self.last_report is not None
+        self.last_whatsapp_result = notifier.notify_setup(self.last_report, force=True)
+        return self._serialize_state(store)
+
+    def _update_open_paper_trades(
+        self, store: SnapshotStore, report: Optional[Dict[str, Any]]
+    ) -> None:
+        """Update MTM PnL and auto-trigger SL / Target / 15-Min Anti-Theta Time Stop on open trades."""
+        if not report:
+            return
+        cur = store.conn.cursor()
+        cur.execute("SELECT * FROM paper_trades WHERE status = 'OPEN' ORDER BY id DESC")
+        open_trades = cur.fetchall()
+        if not open_trades:
+            return
+
+        # Map symbol -> current LTP
+        ltp_map: Dict[str, float] = {}
+        for row in report.get("strikes", []):
+            for k in ("ce", "pe"):
+                leg = row.get(k) or {}
+                if leg.get("symbol"):
+                    ltp_map[leg["symbol"]] = float(leg.get("ltp") or 0.0)
+
+        now_ts = int(report["ts"])
+        for t in open_trades:
+            sym = t["symbol"]
+            if sym not in ltp_map:
+                continue
+            cur_ltp = ltp_map[sym]
+            entry_price = float(t["entry_price"])
+            qty = int(t["quantity"])
+            pnl_pts = round(cur_ltp - entry_price, 2)
+            pnl_rs = round(pnl_pts * qty, 2)
+            held_mins = max(0.0, (now_ts - int(t["entry_ts"])) / 60.0)
+
+            exit_reason = None
+            if cur_ltp <= float(t["stop_loss"]):
+                exit_reason = "HARD_STOP_LOSS (-18%)"
+            elif cur_ltp >= float(t["target_2"]):
+                exit_reason = "TARGET_2_HIT (+45%)"
+            elif cur_ltp >= float(t["target_1"]):
+                exit_reason = "TARGET_1_HIT (+25%)"
+            elif held_mins >= 15.0 and cur_ltp < entry_price * 1.05:
+                exit_reason = "THETA_TIME_STOP (15m < +5%)"
+
+            if exit_reason:
+                cur.execute(
+                    """
+                    UPDATE paper_trades
+                    SET exit_ts = ?, exit_price = ?, pnl_points = ?, pnl_rupees = ?,
+                        status = 'CLOSED', exit_reason = ?
+                    WHERE id = ?
+                    """,
+                    (now_ts, cur_ltp, pnl_pts, pnl_rs, exit_reason, t["id"]),
+                )
+            else:
+                cur.execute(
+                    """
+                    UPDATE paper_trades
+                    SET exit_price = ?, pnl_points = ?, pnl_rupees = ?
+                    WHERE id = ?
+                    """,
+                    (cur_ltp, pnl_pts, pnl_rs, t["id"]),
+                )
+        store.conn.commit()
+
+    def create_paper_trade(self, option_type: str, offset: str = "ATM") -> Dict[str, Any]:
+        """Place a paper trade (and route to OpenAlgo if in LIVE_OPENALGO + Analyze Mode)."""
+        if not self.last_report:
+            self.step_or_poll(advance_demo=False)
+        report = self.last_report
+        assert report is not None
+
+        atm_strike = float(report["atm_strike"])
+        selected_leg = None
+        for r in report["strikes"]:
+            if abs(float(r["strike"]) - atm_strike) < 0.01:
+                selected_leg = r["ce"] if option_type.upper() == "CE" else r["pe"]
+                break
+        if not selected_leg:
+            raise RuntimeError("ATM leg not found in current chain.")
+
+        entry_ltp = float(selected_leg.get("ltp") or 0.0)
+        lotsize = int(selected_leg.get("lotsize") or 65)
+        symbol = str(selected_leg.get("symbol") or f"{self.underlying}_{option_type}")
+        sl = round(entry_ltp * 0.82, 2)
+        t1 = round(entry_ltp * 1.25, 2)
+        t2 = round(entry_ltp * 1.45, 2)
+
+        openalgo_order_id = "SIM-LOCAL"
+        if self.mode == "LIVE_OPENALGO" and self.api_key:
+            gateway = OpenAlgoGateway(host=self.host, api_key=self.api_key)
+            status_resp = gateway.analyzer_status()
+            is_analyze = bool((status_resp.get("data") or {}).get("analyze_mode", False))
+            if not is_analyze:
+                raise RuntimeError(
+                    "OpenAlgo is in LIVE mode! Switch OpenAlgo to Analyze Mode first before placing practice orders."
+                )
+            resp = gateway.place_options_order(
+                underlying=self.underlying,
+                expiry_date=report["expiry_date"],
+                offset=offset,
+                option_type=option_type.upper(),
+                action="BUY",
+                quantity=lotsize,
+                exchange=self.exchange,
+                product="NRML",
+            )
+            openalgo_order_id = str(resp.get("orderid") or "OPENALGO-SIM")
+
+        store = self.get_active_store()
+        cur = store.conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO paper_trades
+            (entry_ts, session_date, underlying, expiry_date, symbol, offset_label,
+             option_type, quantity, entry_price, stop_loss, target_1, target_2,
+             exit_price, pnl_points, pnl_rupees, status, openalgo_order_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0.0, 0.0, 'OPEN', ?)
+            """,
+            (
+                int(report["ts"]),
+                report["session_date"],
+                self.underlying,
+                report["expiry_date"],
+                symbol,
+                offset,
+                option_type.upper(),
+                lotsize,
+                entry_ltp,
+                sl,
+                t1,
+                t2,
+                entry_ltp,
+                openalgo_order_id,
+            ),
+        )
+        store.conn.commit()
+        return self._serialize_state(store)
+
+    def close_paper_trade(self, trade_id: int) -> Dict[str, Any]:
+        store = self.get_active_store()
+        cur = store.conn.cursor()
+        now_ts = int(self.last_report["ts"]) if self.last_report else int(time.time())
+        cur.execute(
+            """
+            UPDATE paper_trades
+            SET status = 'CLOSED', exit_ts = ?, exit_reason = 'MANUAL_SQUARE_OFF'
+            WHERE id = ? AND status = 'OPEN'
+            """,
+            (now_ts, trade_id),
+        )
+        store.conn.commit()
+        return self._serialize_state(store)
+
+    def _serialize_state(self, store: SnapshotStore) -> Dict[str, Any]:
+        cur = store.conn.cursor()
+        cur.execute(
+            """
+            SELECT ts, spot_ltp, atm_straddle_ltp, basis
+            FROM chain_snapshots
+            WHERE underlying = ?
+            ORDER BY ts DESC LIMIT 30
+            """,
+            (self.underlying,),
+        )
+        history = [dict(r) for r in reversed(cur.fetchall())]
+
+        cur.execute("SELECT * FROM paper_trades ORDER BY id DESC LIMIT 20")
+        trades = [dict(r) for r in cur.fetchall()]
+
+        wa_preview = (
+            format_whatsapp_setup_message(self.last_report)
+            if self.last_report
+            else "Waiting for Option Chain snapshot..."
+        )
+        notifier = WhatsAppNotifier(store)
+
+        return {
+            "mode": self.mode,
+            "host": self.host,
+            "has_api_key": bool(self.api_key),
+            "analyze_mode": self.analyze_mode,
+            "underlying": self.underlying,
+            "demo_step": self.demo_step_idx + 1,
+            "demo_total_steps": len(self.demo_scenarios),
+            "error": self.last_error,
+            "report": self.last_report,
+            "history": history,
+            "trades": trades,
+            "whatsapp": {
+                "configured": notifier.is_configured(),
+                "enabled": notifier.enabled,
+                "provider": notifier.provider,
+                "phone": notifier.gmail_user if notifier.provider == "gmail" else notifier.phone,
+                "preview": wa_preview,
+                "last_result": self.last_whatsapp_result,
+            },
+        }
+
+
+APP_STATE = AnalyzerAppState()
+
+
+# ---------------------------------------------------------------------------
+# Embedded Single-Page Trading Desk UI (HTML + CSS + Vanilla JS)
+# ---------------------------------------------------------------------------
+
+INDEX_HTML = r"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>LearnOT — OpenAlgo Option Buying Desk (Nifty / BankNifty)</title>
+  <style>
+    :root {
+      --bg: #0b0f19;
+      --panel: #111827;
+      --panel-alt: #1e293b;
+      --border: #26334d;
+      --text: #f1f5f9;
+      --muted: #94a3b8;
+      --green: #10b981;
+      --green-bg: rgba(16, 185, 129, 0.14);
+      --red: #f43f5e;
+      --red-bg: rgba(244, 63, 94, 0.14);
+      --cyan: #06b6d4;
+      --cyan-bg: rgba(6, 182, 212, 0.16);
+      --amber: #f59e0b;
+      --amber-bg: rgba(245, 158, 11, 0.15);
+      --blue: #3b82f6;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      font-size: 13px;
+      line-height: 1.45;
+      padding-bottom: 40px;
+    }
+    /* Top Navbar */
+    .topbar {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 12px 20px;
+      background: #0f172a;
+      border-bottom: 1px solid var(--border);
+      position: sticky;
+      top: 0;
+      z-index: 50;
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-weight: 700;
+      font-size: 16px;
+      letter-spacing: -0.02em;
+    }
+    .badge {
+      padding: 3px 9px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+    }
+    .badge-sim { background: var(--cyan-bg); color: #22d3ee; border: 1px solid rgba(34,211,238,0.35); }
+    .badge-live { background: var(--red-bg); color: #fb7185; border: 1px solid rgba(251,113,133,0.35); }
+    .badge-demo { background: var(--amber-bg); color: #fbbf24; border: 1px solid rgba(251,191,36,0.35); }
+
+    .controls {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 8px;
+    }
+    select, input, button {
+      background: var(--panel-alt);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 6px 10px;
+      font-size: 12px;
+      outline: none;
+    }
+    button {
+      cursor: pointer;
+      font-weight: 600;
+      transition: all 0.15s ease;
+    }
+    button:hover { border-color: #475569; background: #283548; }
+    .btn-primary { background: var(--blue); border-color: #2563eb; color: #fff; }
+    .btn-primary:hover { background: #2563eb; }
+    .btn-green { background: var(--green); border-color: #059669; color: #052e16; }
+    .btn-green:hover { background: #059669; color: #fff; }
+    .btn-red { background: var(--red); border-color: #e11d48; color: #fff; }
+    .btn-amber { background: var(--amber); border-color: #d97706; color: #1e1b4b; }
+
+    .container { max-width: 1560px; margin: 0 auto; padding: 16px 20px; }
+
+    /* Error / Info Banner */
+    .alert-banner {
+      background: var(--red-bg);
+      border: 1px solid var(--red);
+      color: #fecdd3;
+      padding: 10px 14px;
+      border-radius: 8px;
+      margin-bottom: 14px;
+      display: none;
+    }
+
+    /* KPI Strip */
+    .kpi-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+    .kpi-card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 12px 14px;
+    }
+    .kpi-label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; }
+    .kpi-value { font-size: 20px; font-weight: 700; margin-top: 4px; font-variant-numeric: tabular-nums; }
+    .kpi-sub { font-size: 12px; color: var(--muted); margin-top: 3px; font-variant-numeric: tabular-nums; }
+
+    /* Signal Action Banner */
+    .signal-banner {
+      border-radius: 10px;
+      padding: 14px 18px;
+      margin-bottom: 16px;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+      border: 1px solid var(--border);
+      background: var(--panel);
+    }
+    .signal-buy-ce { background: linear-gradient(90deg, rgba(16,185,129,0.18), rgba(17,24,39,0.95)); border-color: var(--green); }
+    .signal-buy-pe { background: linear-gradient(90deg, rgba(244,63,94,0.18), rgba(17,24,39,0.95)); border-color: var(--red); }
+    .signal-trap { background: linear-gradient(90deg, rgba(245,158,11,0.18), rgba(17,24,39,0.95)); border-color: var(--amber); }
+
+    .signal-title { font-size: 16px; font-weight: 800; }
+    .signal-meta { color: #cbd5e1; font-size: 12.5px; margin-top: 4px; }
+
+    /* Main 2-Column Layout for Checklists & Visual Charts */
+    .mid-grid {
+      display: grid;
+      grid-template-columns: 1.25fr 1fr;
+      gap: 16px;
+      margin-bottom: 16px;
+    }
+    @media (max-width: 1100px) { .mid-grid { grid-template-columns: 1fr; } }
+
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 14px 16px;
+    }
+    .card-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 10px;
+      margin-bottom: 12px;
+      font-weight: 700;
+      font-size: 14px;
+    }
+
+    .checklist-cols {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+    }
+    @media (max-width: 768px) { .checklist-cols { grid-template-columns: 1fr; } }
+
+    .check-box {
+      background: rgba(30, 41, 59, 0.5);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px 12px;
+    }
+    .check-item {
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+      padding: 6px 0;
+      border-bottom: 1px dashed rgba(148, 163, 184, 0.15);
+    }
+    .check-item:last-child { border-bottom: none; }
+    .pill-pass {
+      background: var(--green-bg);
+      color: #34d399;
+      border: 1px solid rgba(52,211,153,0.35);
+      padding: 1px 6px;
+      border-radius: 4px;
+      font-size: 10px;
+      font-weight: 700;
+      flex-shrink: 0;
+      margin-top: 2px;
+    }
+    .pill-wait {
+      background: rgba(148, 163, 184, 0.12);
+      color: var(--muted);
+      border: 1px solid rgba(148,163,184,0.2);
+      padding: 1px 6px;
+      border-radius: 4px;
+      font-size: 10px;
+      font-weight: 700;
+      flex-shrink: 0;
+      margin-top: 2px;
+    }
+
+    /* Option Chain Table */
+    .table-wrap { overflow-x: auto; }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-variant-numeric: tabular-nums;
+      font-size: 12px;
+    }
+    th, td {
+      padding: 8px 9px;
+      border-bottom: 1px solid rgba(38, 51, 77, 0.7);
+      text-align: right;
+      white-space: nowrap;
+    }
+    th {
+      background: #0f172a;
+      color: var(--muted);
+      font-size: 11px;
+      text-transform: uppercase;
+      font-weight: 600;
+    }
+    td.strike-col, th.strike-col {
+      text-align: center;
+      font-weight: 800;
+      background: #172033;
+      color: #f8fafc;
+      border-left: 1px solid var(--border);
+      border-right: 1px solid var(--border);
+    }
+    tr.atm-row td { background: rgba(59, 130, 246, 0.09); }
+    tr.atm-row td.strike-col { background: rgba(59, 130, 246, 0.28); color: #93c5fd; }
+
+    .q-badge {
+      padding: 2px 7px;
+      border-radius: 4px;
+      font-size: 10px;
+      font-weight: 700;
+      display: inline-block;
+    }
+    .q-SHORT_COVERING { background: var(--cyan-bg); color: #22d3ee; border: 1px solid rgba(34,211,238,0.4); }
+    .q-LONG_BUILDUP { background: var(--green-bg); color: #34d399; }
+    .q-SHORT_BUILDUP { background: var(--red-bg); color: #fb7185; }
+    .q-LONG_UNWINDING { background: var(--amber-bg); color: #fbbf24; }
+    .q-NEUTRAL { color: var(--muted); }
+
+    /* Bar Chart inside OI */
+    .oi-bars { display: flex; flex-direction: column; gap: 8px; }
+    .oi-bar-row { display: grid; grid-template-columns: 1fr 64px 1fr; align-items: center; gap: 8px; font-size: 11px; }
+    .bar-left-wrap { display: flex; justify-content: flex-end; align-items: center; gap: 6px; }
+    .bar-right-wrap { display: flex; justify-content: flex-start; align-items: center; gap: 6px; }
+    .bar-ce { height: 14px; background: linear-gradient(90deg, #f43f5e, #e11d48); border-radius: 3px; }
+    .bar-pe { height: 14px; background: linear-gradient(90deg, #059669, #10b981); border-radius: 3px; }
+
+    .pos-green { color: #34d399; }
+    .neg-red { color: #fb7185; }
+    .wa-pre {
+      background: #09131c;
+      border: 1px solid rgba(16,185,129,0.35);
+      border-radius: 8px;
+      padding: 10px 12px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 11.5px;
+      white-space: pre-wrap;
+      color: #d1fae5;
+      max-height: 240px;
+      overflow-y: auto;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Top Navigation & OpenAlgo Controls -->
+  <div class="topbar">
+    <div class="brand">
+      <span>⚡ LearnOT Option Buying Desk</span>
+      <span id="modeBadge" class="badge badge-demo">DEMO SIMULATION</span>
+    </div>
+
+    <div class="controls">
+      <label style="color:var(--muted)">Mode:</label>
+      <select id="modeSelect" onchange="changeConfig()">
+        <option value="DEMO">Practice Simulator (5-Stage Demo)</option>
+        <option value="LIVE_OPENALGO">Live OpenAlgo (127.0.0.1:5000)</option>
+      </select>
+
+      <label style="color:var(--muted)">Index:</label>
+      <select id="underlyingSelect" onchange="changeConfig()">
+        <option value="NIFTY">NIFTY 50</option>
+        <option value="BANKNIFTY">BANKNIFTY</option>
+        <option value="SENSEX">SENSEX</option>
+      </select>
+
+      <input type="password" id="apiKeyInput" placeholder="OpenAlgo API Key (optional in Demo)" style="width:180px;" />
+      <button onclick="saveApiKey()">Save Key</button>
+
+      <button id="stepBtn" class="btn-amber" onclick="refreshData(true)">▶ Next Demo Snapshot (1/5)</button>
+      <button class="btn-primary" onclick="refreshData(false)">↻ Refresh Now</button>
+
+      <select id="autoRefreshSelect" onchange="toggleAutoRefresh()">
+        <option value="0">Auto-Poll: OFF</option>
+        <option value="180">Auto-Poll: 180s (3m NSE OI Cycle ★)</option>
+        <option value="60">Auto-Poll: 60s</option>
+        <option value="30">Auto-Poll: 30s</option>
+      </select>
+    </div>
+  </div>
+
+  <div class="container">
+    <div id="errorBanner" class="alert-banner"></div>
+
+    <!-- KPI Cards -->
+    <div class="kpi-grid">
+      <div class="kpi-card">
+        <div class="kpi-label">Spot LTP vs Session VWAP</div>
+        <div class="kpi-value" id="kpiSpot">--</div>
+        <div class="kpi-sub" id="kpiSpotSub">Session VWAP: --</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">ATM Straddle (Theta vs Gamma)</div>
+        <div class="kpi-value" id="kpiStraddle">--</div>
+        <div class="kpi-sub" id="kpiStraddleSub">Open: -- | Change: --</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Near-ATM PCR & 15m dOI Battle</div>
+        <div class="kpi-value" id="kpiPcr">--</div>
+        <div class="kpi-sub" id="kpiDoiBattle">15m PE dOI: -- | CE dOI: --</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Institutional OI Walls</div>
+        <div class="kpi-value" id="kpiWalls">--</div>
+        <div class="kpi-sub" id="kpiWallsSub">Support (PE) vs Resistance (CE)</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Synthetic Future & Carry Basis</div>
+        <div class="kpi-value" id="kpiSynth">--</div>
+        <div class="kpi-sub" id="kpiSynthSub">Put-Call Parity Fair Value</div>
+      </div>
+    </div>
+
+    <!-- Action Signal Banner -->
+    <div id="signalBanner" class="signal-banner">
+      <div>
+        <div class="signal-title" id="signalTitle">Evaluating 6-Point Gamma Blast Checklist...</div>
+        <div class="signal-meta" id="signalMeta">Waiting for data snapshot...</div>
+      </div>
+      <div style="display:flex; flex-wrap:wrap; gap:8px;">
+        <button class="btn-green" onclick="placePaperOrder('CE')">+ Practice Buy ATM CE</button>
+        <button class="btn-red" onclick="placePaperOrder('PE')">+ Practice Buy ATM PE</button>
+        <button class="btn-primary" onclick="sendWhatsAppNow()">📧 Send Setup Alert (Gmail)</button>
+      </div>
+    </div>
+
+    <!-- Middle Grid: 6-Point Checklists & OI Wall Chart + Gmail/Alert Preview -->
+    <div class="mid-grid">
+      <div class="card">
+        <div class="card-header">
+          <span>6-Point "Trapped Seller Gamma Blast" Mechanical Checklist (3-Min NSE OI Cycle)</span>
+          <span id="scoreSummary" style="color:var(--muted); font-size:12px;">CE: 0/6 | PE: 0/6</span>
+        </div>
+        <div class="checklist-cols">
+          <div class="check-box">
+            <div style="font-weight:700; color:#34d399; margin-bottom:6px;" id="ceBoxTitle">Bullish ATM CE Setup (0/6)</div>
+            <div id="ceCheckList"></div>
+          </div>
+          <div class="check-box">
+            <div style="font-weight:700; color:#fb7185; margin-bottom:6px;" id="peBoxTitle">Bearish ATM PE Setup (0/6)</div>
+            <div id="peCheckList"></div>
+          </div>
+        </div>
+      </div>
+
+      <div style="display:flex; flex-direction:column; gap:16px;">
+        <div class="card">
+          <div class="card-header">
+            <span>Strike OI Walls & 3-Min Change in OI (3m dOI)</span>
+            <span style="font-size:11px; color:var(--muted);">Red = Call Resistance | Green = Put Support</span>
+          </div>
+          <div id="oiBarsContainer" class="oi-bars"></div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <span>📧 Gmail / Instant Setup Auto-Alert (Fires on 6/6 Setup)</span>
+            <span id="waStatusBadge" class="badge badge-demo">PREVIEW MODE</span>
+          </div>
+          <div style="display:flex; flex-wrap:wrap; gap:6px; margin-bottom:8px;">
+            <select id="waProvider" style="width:140px;" onchange="updateAlertPlaceholders()">
+              <option value="gmail" selected>Gmail (Official ★)</option>
+              <option value="webhook">Custom Webhook</option>
+              <option value="callmebot">CallMeBot</option>
+              <option value="meta">Meta Cloud API</option>
+            </select>
+            <input type="text" id="waPhone" placeholder="your_email@gmail.com" style="width:165px;" />
+            <input type="password" id="waKey" placeholder="16-char Google App Password" style="flex:1; min-width:150px;" />
+            <button onclick="saveWhatsAppConfig()">Save Alert</button>
+          </div>
+          <div id="waPreviewBox" class="wa-pre">Loading setup alert message preview...</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Option Chain Table -->
+    <div class="card" style="margin-bottom:16px;">
+      <div class="card-header">
+        <span id="chainHeaderTitle">Live Option Chain + Greeks + 4-Quadrant OI Matrix (3-Min NSE OI Cycle)</span>
+        <span style="font-size:11px; color:var(--muted);">
+          Cyan <b style="color:#22d3ee">SHORT_COVERING</b> = Trapped Option Sellers Panicking (Your #1 Buying Edge)
+        </span>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th style="text-align:left">CE Quadrant</th>
+              <th>CE OI</th>
+              <th>CE 3m dOI</th>
+              <th>CE Vol Ratio</th>
+              <th>CE IV</th>
+              <th>CE Δ</th>
+              <th>CE Θ</th>
+              <th>CE VWAP</th>
+              <th>CE LTP</th>
+              <th class="strike-col">STRIKE</th>
+              <th style="text-align:left">PE LTP</th>
+              <th>PE VWAP</th>
+              <th>PE Θ</th>
+              <th>PE Δ</th>
+              <th>PE IV</th>
+              <th>PE Vol Ratio</th>
+              <th>PE 3m dOI</th>
+              <th>PE OI</th>
+              <th style="text-align:left">PE Quadrant</th>
+            </tr>
+          </thead>
+          <tbody id="chainTableBody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Setup & Fine-Tuning Journal (Score >= 3/6) -->
+    <div class="card" style="margin-bottom:16px;">
+      <div class="card-header">
+        <span>📓 Setup &amp; Fine-Tuning Journal (Logs All Setups With &ge; 3/6 Conditions Met)</span>
+        <span id="journalFileBadge" style="font-size:11px; color:#93c5fd;">Saved to: doc/TRADING_JOURNAL.md &amp; doc/trading_journal.csv</span>
+      </div>
+      <div id="journalBlockerBanner" style="padding:8px 12px; margin-bottom:10px; border-radius:6px; background:rgba(59,130,246,0.1); border:1px solid rgba(59,130,246,0.3); font-size:12px; color:#e2e8f0;">
+        Evaluating rule blockers (e.g., PCR, Volume Burst, VWAP)...
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th style="text-align:left">Time</th>
+              <th style="text-align:left">Contract</th>
+              <th>Side</th>
+              <th>Score</th>
+              <th>Entry LTP</th>
+              <th>Max LTP After</th>
+              <th>Max Gain %</th>
+              <th style="text-align:left">Verdict (Outcome After Signal)</th>
+              <th style="text-align:left">Missing Conditions (What Blocked 6/6)</th>
+              <th style="text-align:left">Passed Conditions</th>
+            </tr>
+          </thead>
+          <tbody id="journalTableBody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Practice / Paper Trades Log with 15-Minute Anti-Theta Timer -->
+    <div class="card">
+      <div class="card-header">
+        <span>Practice & OpenAlgo Analyze-Mode Trade Log (With 15-Minute Anti-Theta Time-Stop)</span>
+        <span style="font-size:11px; color:var(--muted);">Auto-exits at -18% SL, +25%/+45% Target, or after 15 mins if gain &lt; +5%</span>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th style="text-align:left">ID</th>
+              <th style="text-align:left">Symbol</th>
+              <th>Type</th>
+              <th>Qty</th>
+              <th>Entry LTP</th>
+              <th>Current / Exit</th>
+              <th>Hard SL (-18%)</th>
+              <th>Target 1 (+25%)</th>
+              <th>Target 2 (+45%)</th>
+              <th>PnL (Pts)</th>
+              <th>PnL (₹)</th>
+              <th>Status / Exit Reason</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody id="tradesTableBody"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let autoRefreshTimer = null;
+
+    function fmtNum(n, dec = 2) {
+      if (n === null || n === undefined || isNaN(n)) return "--";
+      return Number(n).toLocaleString("en-IN", { minimumFractionDigits: dec, maximumFractionDigits: dec });
+    }
+    function fmtInt(n, signed = false) {
+      if (n === null || n === undefined || isNaN(n)) return "--";
+      const val = Math.round(Number(n));
+      const s = Math.abs(val).toLocaleString("en-IN");
+      if (val > 0) return (signed ? "+" : "") + s;
+      if (val < 0) return "-" + s;
+      return "0";
+    }
+
+    async function apiCall(path, method = "GET", body = null) {
+      const opts = { method, headers: { "Content-Type": "application/json" } };
+      if (body) opts.body = JSON.stringify(body);
+      const res = await fetch(path, opts);
+      return await res.json();
+    }
+
+    async function refreshData(advanceDemo = false) {
+      const data = await apiCall("/api/state?advance=" + (advanceDemo ? "1" : "0"));
+      renderState(data);
+    }
+
+    async function changeConfig() {
+      const mode = document.getElementById("modeSelect").value;
+      const underlying = document.getElementById("underlyingSelect").value;
+      const data = await apiCall("/api/config", "POST", { mode, underlying });
+      renderState(data);
+    }
+
+    async function saveApiKey() {
+      const apiKey = document.getElementById("apiKeyInput").value.trim();
+      const data = await apiCall("/api/config", "POST", { api_key: apiKey, mode: apiKey ? "LIVE_OPENALGO" : "DEMO" });
+      document.getElementById("apiKeyInput").value = "";
+      renderState(data);
+    }
+
+    function updateAlertPlaceholders() {
+      const provider = document.getElementById("waProvider").value;
+      const phoneInput = document.getElementById("waPhone");
+      const keyInput = document.getElementById("waKey");
+      if (provider === "gmail") {
+        phoneInput.placeholder = "your_email@gmail.com";
+        keyInput.placeholder = "16-char Google App Password";
+      } else if (provider === "webhook") {
+        phoneInput.placeholder = "Recipient / Channel (optional)";
+        keyInput.placeholder = "https://your-webhook-url...";
+      } else {
+        phoneInput.placeholder = "+919876543210";
+        keyInput.placeholder = "API Key / Access Token";
+      }
+    }
+
+    async function saveWhatsAppConfig() {
+      const provider = document.getElementById("waProvider").value;
+      const phone = document.getElementById("waPhone").value.trim();
+      const key = document.getElementById("waKey").value.trim();
+      const data = await apiCall("/api/whatsapp", "POST", { action: "CONFIG", provider, phone, api_key: key });
+      document.getElementById("waKey").value = "";
+      renderState(data);
+    }
+
+    async function sendWhatsAppNow() {
+      const data = await apiCall("/api/whatsapp", "POST", { action: "SEND_NOW" });
+      renderState(data);
+    }
+
+    async function placePaperOrder(optionType) {
+      const data = await apiCall("/api/trade", "POST", { action: "OPEN", option_type: optionType });
+      renderState(data);
+    }
+
+    async function closePaperOrder(tradeId) {
+      const data = await apiCall("/api/trade", "POST", { action: "CLOSE", trade_id: tradeId });
+      renderState(data);
+    }
+
+    function toggleAutoRefresh() {
+      if (autoRefreshTimer) clearInterval(autoRefreshTimer);
+      const sec = parseInt(document.getElementById("autoRefreshSelect").value, 10);
+      if (sec > 0) {
+        autoRefreshTimer = setInterval(() => refreshData(false), sec * 1000);
+      }
+    }
+
+    function renderState(state) {
+      document.getElementById("modeSelect").value = state.mode;
+      document.getElementById("underlyingSelect").value = state.underlying;
+
+      const badge = document.getElementById("modeBadge");
+      const stepBtn = document.getElementById("stepBtn");
+      if (state.mode === "DEMO") {
+        badge.className = "badge badge-demo";
+        badge.textContent = `PRACTICE SIMULATOR (STEP ${state.demo_step}/${state.demo_total_steps})`;
+        stepBtn.style.display = "inline-block";
+        stepBtn.textContent = `▶ Next Demo Snapshot (${state.demo_step}/${state.demo_total_steps})`;
+      } else {
+        stepBtn.style.display = "none";
+        if (state.analyze_mode === true) {
+          badge.className = "badge badge-sim";
+          badge.textContent = "OPENALGO ANALYZE MODE (SAFE SIMULATOR)";
+        } else if (state.analyze_mode === false) {
+          badge.className = "badge badge-live";
+          badge.textContent = "OPENALGO LIVE BROKER MODE";
+        } else {
+          badge.className = "badge badge-demo";
+          badge.textContent = "OPENALGO CONNECTING...";
+        }
+      }
+
+      const errBanner = document.getElementById("errorBanner");
+      if (state.error) {
+        errBanner.style.display = "block";
+        errBanner.textContent = "OpenAlgo Notice: " + state.error;
+      } else {
+        errBanner.style.display = "none";
+      }
+
+      // Gmail / Setup Alert Panel
+      if (state.whatsapp) {
+        const wa = state.whatsapp;
+        document.getElementById("waPreviewBox").textContent = wa.preview || "";
+        if (wa.provider) {
+          document.getElementById("waProvider").value = wa.provider;
+          updateAlertPlaceholders();
+        }
+        if (wa.phone && !document.getElementById("waPhone").value) {
+          document.getElementById("waPhone").value = wa.phone;
+        }
+        const waBadge = document.getElementById("waStatusBadge");
+        if (wa.last_result && wa.last_result.status === "SENT") {
+          waBadge.className = "badge badge-sim";
+          waBadge.textContent = `${(wa.provider || "ALERT").toUpperCase()} SENT ✓`;
+        } else if (wa.last_result && wa.last_result.status === "ERROR") {
+          waBadge.className = "badge badge-live";
+          waBadge.textContent = `ALERT ERROR`;
+        } else if (wa.configured) {
+          waBadge.className = "badge badge-sim";
+          waBadge.textContent = `ARMED (${wa.provider.toUpperCase()})`;
+        } else {
+          waBadge.className = "badge badge-demo";
+          waBadge.textContent = "PREVIEW MODE (Add Gmail App Password)";
+        }
+      }
+
+      const rep = state.report;
+      if (!rep) return;
+
+      // KPI Strip
+      const spotDiff = rep.spot_ltp - rep.spot_vwap;
+      document.getElementById("kpiSpot").innerHTML =
+        `${fmtNum(rep.spot_ltp)} <span style="font-size:13px" class="${spotDiff >= 0 ? 'pos-green' : 'neg-red'}">(${spotDiff >= 0 ? '+' : ''}${fmtNum(spotDiff)})</span>`;
+      document.getElementById("kpiSpotSub").textContent =
+        `Session VWAP: ${fmtNum(rep.spot_vwap)} | ATM: ${fmtInt(rep.atm_strike)}`;
+
+      const stradPct = rep.straddle_change_pct || 0;
+      document.getElementById("kpiStraddle").innerHTML =
+        `₹${fmtNum(rep.atm_straddle_ltp)} <span style="font-size:13px" class="${stradPct >= 0 ? 'pos-green' : 'neg-red'}">(${stradPct >= 0 ? '+' : ''}${fmtNum(stradPct)}%)</span>`;
+      document.getElementById("kpiStraddleSub").textContent =
+        `Open Straddle: ₹${fmtNum(rep.opening_straddle)} (${stradPct < -2 ? 'Theta Decaying' : 'Expanding/Stable'})`;
+
+      document.getElementById("kpiPcr").textContent = `PCR ${fmtNum(rep.overall_pcr)}`;
+      document.getElementById("kpiDoiBattle").innerHTML =
+        `15m PE dOI: <b class="pos-green">${fmtInt(rep.near_pe_doi_15m, true)}</b> vs CE: <b class="neg-red">${fmtInt(rep.near_ce_doi_15m, true)}</b>`;
+
+      document.getElementById("kpiWalls").textContent =
+        `${fmtInt(rep.support_strike)} PE / ${fmtInt(rep.resistance_strike)} CE`;
+      document.getElementById("kpiWallsSub").textContent =
+        `Sup OI: ${fmtInt(rep.support_oi)} | Res OI: ${fmtInt(rep.resistance_oi)}`;
+
+      document.getElementById("kpiSynth").textContent =
+        rep.synthetic_future ? fmtNum(rep.synthetic_future) : "N/A";
+      document.getElementById("kpiSynthSub").textContent =
+        `Basis (Fair - Spot): ${rep.basis >= 0 ? '+' : ''}${fmtNum(rep.basis)} pts (${rep.expiry_date})`;
+
+      // Signal Banner
+      const sig = rep.signals;
+      const sb = document.getElementById("signalBanner");
+      const st = document.getElementById("signalTitle");
+      const sm = document.getElementById("signalMeta");
+      sb.className = "signal-banner";
+
+      if (sig.action === "BUY_ATM_CE" && sig.trade_plan) {
+        sb.classList.add("signal-buy-ce");
+        const tp = sig.trade_plan;
+        st.innerHTML = `🚀 HIGH-CONVICTION GAMMA BLAST: BUY ATM CALL (${tp.symbol}) — WhatsApp Ready!`;
+        sm.innerHTML = `Entry LTP: <b>₹${fmtNum(tp.entry_ltp)}</b> | Hard Stop-Loss (-18%): <b>₹${fmtNum(tp.stop_loss)}</b> | Target 1 (+25%): <b>₹${fmtNum(tp.target_1)}</b> | Target 2 (+45%): <b>₹${fmtNum(tp.target_2)}</b> | <b>15m Anti-Theta Stop:</b> Exit if &lt; ₹${fmtNum(tp.entry_ltp * 1.05)}`;
+      } else if (sig.action === "BUY_ATM_PE" && sig.trade_plan) {
+        sb.classList.add("signal-buy-pe");
+        const tp = sig.trade_plan;
+        st.innerHTML = `🔻 HIGH-CONVICTION GAMMA BLAST: BUY ATM PUT (${tp.symbol}) — WhatsApp Ready!`;
+        sm.innerHTML = `Entry LTP: <b>₹${fmtNum(tp.entry_ltp)}</b> | Hard Stop-Loss (-18%): <b>₹${fmtNum(tp.stop_loss)}</b> | Target 1 (+25%): <b>₹${fmtNum(tp.target_1)}</b> | Target 2 (+45%): <b>₹${fmtNum(tp.target_2)}</b> | <b>15m Anti-Theta Stop:</b> Exit if &lt; ₹${fmtNum(tp.entry_ltp * 1.05)}`;
+      } else if (sig.action === "THETA_TRAP_NO_TRADE") {
+        sb.classList.add("signal-trap");
+        st.innerHTML = `⚠️ THETA TRAP DETECTED — DO NOT BUY OPTIONS RIGHT NOW`;
+        sm.innerHTML = `ATM Straddle premium is decaying (${fmtNum(rep.straddle_change_pct)}%) while BOTH Call & Put Writers are adding OI. Institutional straddle sellers are eating Theta!`;
+      } else {
+        st.innerHTML = `⏳ WAIT FOR 6/6 ALIGNMENT (Current Best — Bullish CE: ${sig.ce_score}/6 | Bearish PE: ${sig.pe_score}/6)`;
+        sm.innerHTML = `Polling every 3 mins (NSE OI Cycle). Wait for Trapped Writers (SHORT_COVERING) + Volume Burst + IV Stability.`;
+      }
+
+      // Checklists
+      document.getElementById("scoreSummary").textContent =
+        `CE Score: ${sig.ce_score}/6 | PE Score: ${sig.pe_score}/6`;
+      document.getElementById("ceBoxTitle").textContent =
+        `Bullish ATM CE Checklist (${sig.ce_score}/6)`;
+      document.getElementById("peBoxTitle").textContent =
+        `Bearish ATM PE Checklist (${sig.pe_score}/6)`;
+
+      const renderChecks = (items) =>
+        items.map(([title, passed, detail]) => `
+          <div class="check-item">
+            <span class="${passed ? 'pill-pass' : 'pill-wait'}">${passed ? 'PASS' : 'WAIT'}</span>
+            <div>
+              <div style="font-weight:600; color:${passed ? '#f8fafc' : '#94a3b8'}">${title}</div>
+              <div style="font-size:11px; color:var(--muted)">${detail}</div>
+            </div>
+          </div>
+        `).join("");
+
+      document.getElementById("ceCheckList").innerHTML = renderChecks(sig.ce_checks || []);
+      document.getElementById("peCheckList").innerHTML = renderChecks(sig.pe_checks || []);
+
+      // OI Bars Visualization
+      const maxOi = Math.max(
+        1,
+        ...rep.strikes.map(r => Math.max(r.ce.oi || 0, r.pe.oi || 0))
+      );
+      document.getElementById("oiBarsContainer").innerHTML = rep.strikes.map(r => {
+        const ceW = Math.round(((r.ce.oi || 0) / maxOi) * 140);
+        const peW = Math.round(((r.pe.oi || 0) / maxOi) * 140);
+        const isAtm = Math.abs(r.strike - rep.atm_strike) < 0.01;
+        return `
+          <div class="oi-bar-row" style="${isAtm ? 'background:rgba(59,130,246,0.12); padding:3px 4px; border-radius:4px;' : ''}">
+            <div class="bar-left-wrap">
+              <span style="color:var(--muted)">${fmtInt(r.ce.doi_3m, true)}</span>
+              <div class="bar-ce" style="width:${ceW}px"></div>
+            </div>
+            <div style="text-align:center; font-weight:700; color:${isAtm ? '#93c5fd' : '#e2e8f0'}">${fmtInt(r.strike)}</div>
+            <div class="bar-right-wrap">
+              <div class="bar-pe" style="width:${peW}px"></div>
+              <span style="color:var(--muted)">${fmtInt(r.pe.doi_3m, true)}</span>
+            </div>
+          </div>
+        `;
+      }).join("");
+
+      // Option Chain Table
+      document.getElementById("chainHeaderTitle").textContent =
+        `Live Option Chain (${rep.underlying} — Expiry ${rep.expiry_date} — ${rep.days_to_expiry}d to Expiry)`;
+
+      document.getElementById("chainTableBody").innerHTML = rep.strikes.map(r => {
+        const ce = r.ce || {};
+        const pe = r.pe || {};
+        const isAtm = Math.abs(r.strike - rep.atm_strike) < 0.01;
+        return `
+          <tr class="${isAtm ? 'atm-row' : ''}">
+            <td style="text-align:left"><span class="q-badge q-${ce.quadrant}">${ce.quadrant}</span></td>
+            <td>${fmtInt(ce.oi)}</td>
+            <td class="${(ce.doi_3m || 0) < 0 ? 'pos-green' : 'neg-red'}">${fmtInt(ce.doi_3m, true)}</td>
+            <td>${fmtNum(ce.vol_burst_ratio)}x</td>
+            <td>${fmtNum(ce.implied_volatility, 1)}%</td>
+            <td>${fmtNum(ce.delta, 2)}</td>
+            <td>${fmtNum(ce.theta, 1)}</td>
+            <td>${fmtNum(ce.vwap)}</td>
+            <td style="font-weight:700; color:${ce.ltp >= ce.vwap ? '#34d399' : '#f8fafc'}">₹${fmtNum(ce.ltp)}</td>
+            <td class="strike-col">${isAtm ? '★ ' : ''}${fmtInt(r.strike)}</td>
+            <td style="text-align:left; font-weight:700; color:${pe.ltp >= pe.vwap ? '#34d399' : '#f8fafc'}">₹${fmtNum(pe.ltp)}</td>
+            <td>${fmtNum(pe.vwap)}</td>
+            <td>${fmtNum(pe.theta, 1)}</td>
+            <td>${fmtNum(pe.delta, 2)}</td>
+            <td>${fmtNum(pe.implied_volatility, 1)}%</td>
+            <td>${fmtNum(pe.vol_burst_ratio)}x</td>
+            <td class="${(pe.doi_3m || 0) > 0 ? 'pos-green' : 'neg-red'}">${fmtInt(pe.doi_3m, true)}</td>
+            <td>${fmtInt(pe.oi)}</td>
+            <td style="text-align:left"><span class="q-badge q-${pe.quadrant}">${pe.quadrant}</span></td>
+          </tr>
+        `;
+      }).join("");
+
+      // Setup & Fine-Tuning Journal (Score >= 3/6)
+      const journal = rep.journal || {};
+      const jEntries = journal.entries || [];
+      const blockers = journal.blocker_summary || [];
+      const blockerBanner = document.getElementById("journalBlockerBanner");
+      if (blockers.length > 0) {
+        blockerBanner.innerHTML = `<div style="font-weight:700; color:#93c5fd; margin-bottom:4px;">💡 Rule Blocker Fine-Tuning Insights (When &ge; 3/6 Conditions Met):</div>` +
+          blockers.map(b =>
+            `<div style="margin-top:2px;">• <b>${b.rule}</b> — Failed <b>${b.times_blocked}x</b> | Missed Winners (&ge;+12%): <b class="${b.missed_winners > 0 ? 'neg-red' : 'pos-green'}">${b.missed_winners}</b> | Avg Max Gain After: <b>${b.avg_max_gain_pct >= 0 ? '+' : ''}${fmtNum(b.avg_max_gain_pct, 1)}%</b> &rarr; <span style="color:#cbd5e1">${b.advice}</span></div>`
+          ).join("");
+      } else {
+        blockerBanner.innerHTML = `💡 <b>Fine-Tuning Tracker Active:</b> Any snapshot scoring <b>3/6, 4/6, 5/6, or 6/6</b> is automatically logged here and to <code>journal/LATEST_JOURNAL.md</code> so you can see which missing condition (e.g., PCR, Volume Burst) blocked profitable moves.`;
+      }
+
+      if (jEntries.length === 0) {
+        document.getElementById("journalTableBody").innerHTML =
+          `<tr><td colspan="10" style="text-align:center; color:var(--muted); padding:14px;">No setups with &ge; 3/6 conditions met yet in this session.</td></tr>`;
+      } else {
+        document.getElementById("journalTableBody").innerHTML = jEntries.map(je => {
+          const maxGain = Number(je.max_gain_pct || 0);
+          const gainCls = maxGain >= 12 ? "pos-green" : (maxGain < 0 ? "neg-red" : "");
+          const isMissedWinner = String(je.verdict || "").includes("MISSED WINNER");
+          return `
+            <tr style="${isMissedWinner ? 'background:rgba(245,158,11,0.08);' : ''}">
+              <td style="text-align:left">${je.time_str}</td>
+              <td style="text-align:left; font-weight:700">${je.symbol}</td>
+              <td>${je.option_type}</td>
+              <td style="font-weight:700; color:${je.score === 6 ? '#34d399' : '#fbbf24'}">${je.score}/6</td>
+              <td>₹${fmtNum(je.entry_ltp)}</td>
+              <td style="font-weight:700">₹${fmtNum(je.max_ltp_after)}</td>
+              <td class="${gainCls}" style="font-weight:700">${maxGain >= 0 ? '+' : ''}${fmtNum(maxGain, 1)}%</td>
+              <td style="text-align:left; font-weight:600; color:${isMissedWinner ? '#fbbf24' : '#e2e8f0'}">${je.verdict}</td>
+              <td style="text-align:left; color:#fca5a5; white-space:normal; max-width:340px;">${je.missing_rules}</td>
+              <td style="text-align:left; color:#86efac; white-space:normal; max-width:260px;">${je.passed_rules}</td>
+            </tr>
+          `;
+        }).join("");
+      }
+
+      // Trades Table
+      const trades = state.trades || [];
+      if (trades.length === 0) {
+        document.getElementById("tradesTableBody").innerHTML =
+          `<tr><td colspan="13" style="text-align:center; color:var(--muted); padding:16px;">No practice trades yet. Click "+ Practice Buy ATM CE/PE" when a 6/6 Gamma Blast triggers!</td></tr>`;
+      } else {
+        document.getElementById("tradesTableBody").innerHTML = trades.map(t => {
+          const pnlPts = Number(t.pnl_points || 0);
+          const pnlRs = Number(t.pnl_rupees || 0);
+          const cls = pnlRs >= 0 ? "pos-green" : "neg-red";
+          return `
+            <tr>
+              <td style="text-align:left">#${t.id}</td>
+              <td style="text-align:left; font-weight:700">${t.symbol}</td>
+              <td>${t.option_type}</td>
+              <td>${t.quantity}</td>
+              <td>₹${fmtNum(t.entry_price)}</td>
+              <td style="font-weight:700">₹${fmtNum(t.exit_price)}</td>
+              <td class="neg-red">₹${fmtNum(t.stop_loss)}</td>
+              <td class="pos-green">₹${fmtNum(t.target_1)}</td>
+              <td class="pos-green">₹${fmtNum(t.target_2)}</td>
+              <td class="${cls}">${pnlPts >= 0 ? '+' : ''}${fmtNum(pnlPts)}</td>
+              <td class="${cls}" style="font-weight:700">${pnlRs >= 0 ? '+' : ''}₹${fmtNum(pnlRs)}</td>
+              <td>${t.status === 'OPEN' ? '<span class="badge badge-sim">OPEN (Monitoring 15m Timer)</span>' : `<span class="badge badge-demo">${t.exit_reason || 'CLOSED'}</span>`}</td>
+              <td>${t.status === 'OPEN' ? `<button onclick="closePaperOrder(${t.id})">Square Off</button>` : '--'}</td>
+            </tr>
+          `;
+        }).join("");
+      }
+    }
+
+    // Initial load
+    refreshData(false);
+  </script>
+</body>
+</html>
+"""
+
+
+# ---------------------------------------------------------------------------
+# HTTP Server Request Handler
+# ---------------------------------------------------------------------------
+
+class DashboardRequestHandler(BaseHTTPRequestHandler):
+    def log_message(self, format: str, *args: Any) -> None:
+        pass
+
+    def _send_json(self, payload: Dict[str, Any], status: int = 200) -> None:
+        body = json.dumps(payload).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self) -> None:
+        parsed = urllib.parse.urlparse(self.path)
+        if parsed.path == "/":
+            body = INDEX_HTML.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
+        if parsed.path == "/api/state":
+            qs = urllib.parse.parse_qs(parsed.query)
+            advance = qs.get("advance", ["0"])[0] == "1"
+            state = APP_STATE.step_or_poll(advance_demo=advance)
+            self._send_json(state)
+            return
+
+        self._send_json({"error": "Not found"}, status=404)
+
+    def do_POST(self) -> None:
+        parsed = urllib.parse.urlparse(self.path)
+        length = int(self.headers.get("Content-Length", "0"))
+        raw = self.rfile.read(length).decode("utf-8") if length > 0 else "{}"
+        data = json.loads(raw or "{}")
+
+        if parsed.path == "/api/config":
+            if "api_key" in data and data["api_key"]:
+                APP_STATE.api_key = str(data["api_key"]).strip()
+            if "mode" in data:
+                APP_STATE.mode = str(data["mode"])
+            if "underlying" in data and data["underlying"] != APP_STATE.underlying:
+                APP_STATE.underlying = str(data["underlying"])
+                APP_STATE._reset_demo(APP_STATE.underlying)
+            state = APP_STATE.step_or_poll(advance_demo=False)
+            self._send_json(state)
+            return
+
+        if parsed.path == "/api/whatsapp":
+            action = data.get("action")
+            if action == "CONFIG":
+                provider = str(data.get("provider", "gmail")).strip()
+                phone = str(data.get("phone", "")).strip()
+                key = str(data.get("api_key", "")).strip()
+                os.environ["WHATSAPP_ENABLED"] = "true"
+                os.environ["WHATSAPP_PROVIDER"] = provider
+                if provider == "gmail":
+                    if phone:
+                        os.environ["GMAIL_USER"] = phone
+                        os.environ["GMAIL_TO"] = phone
+                    if key:
+                        os.environ["GMAIL_APP_PASSWORD"] = key.replace(" ", "")
+                else:
+                    if phone:
+                        os.environ["WHATSAPP_PHONE"] = phone
+                    if key:
+                        if provider == "webhook":
+                            os.environ["WHATSAPP_WEBHOOK_URL"] = key
+                        else:
+                            os.environ["WHATSAPP_API_KEY"] = key
+                self._send_json(APP_STATE._serialize_state(APP_STATE.get_active_store()))
+                return
+            if action == "SEND_NOW":
+                state = APP_STATE.send_manual_whatsapp()
+                self._send_json(state)
+                return
+
+        if parsed.path == "/api/trade":
+            try:
+                action = data.get("action")
+                if action == "OPEN":
+                    opt_type = str(data.get("option_type", "CE"))
+                    state = APP_STATE.create_paper_trade(option_type=opt_type)
+                elif action == "CLOSE":
+                    trade_id = int(data.get("trade_id", 0))
+                    state = APP_STATE.close_paper_trade(trade_id=trade_id)
+                else:
+                    state = APP_STATE.step_or_poll(advance_demo=False)
+                self._send_json(state)
+            except Exception as exc:
+                APP_STATE.last_error = str(exc)
+                self._send_json(APP_STATE._serialize_state(APP_STATE.get_active_store()))
+            return
+
+        self._send_json({"error": "Not found"}, status=404)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="LearnOT Option Buying Web UI Desk")
+    parser.add_argument("--host", default="127.0.0.1", help="Bind address (default: 127.0.0.1)")
+    parser.add_argument("--port", type=int, default=8080, help="Port number (default: 8080)")
+    args = parser.parse_args()
+
+    server = HTTPServer((args.host, args.port), DashboardRequestHandler)
+    print(f"\n======================================================================")
+    print(f" LearnOT Option Buying UI Desk is running at: http://{args.host}:{args.port}")
+    print(f" Connected OpenAlgo Target                  : {APP_STATE.host}")
+    print(f" Default Polling Cycle                      : 180s (3-Min NSE OI Cycle)")
+    print(f"======================================================================\n")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\n[*] Shutting down UI server.")
+        server.server_close()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
