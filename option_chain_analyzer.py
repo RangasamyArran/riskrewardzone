@@ -339,6 +339,40 @@ class SnapshotStore:
                 delta REAL NOT NULL,
                 theta_bleed_pct REAL NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS daily_pre_market_plans (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_date TEXT NOT NULL,
+                underlying TEXT NOT NULL,
+                pdh REAL NOT NULL DEFAULT 0.0,
+                pdl REAL NOT NULL DEFAULT 0.0,
+                pdc REAL NOT NULL DEFAULT 0.0,
+                pre_open_spot REAL NOT NULL DEFAULT 0.0,
+                gap_pts REAL NOT NULL DEFAULT 0.0,
+                gap_regime TEXT NOT NULL DEFAULT 'FLAT',
+                india_vix REAL NOT NULL DEFAULT 13.5,
+                vix_regime TEXT NOT NULL DEFAULT 'IDEAL_VOL (12-18)',
+                call_wall_strike REAL NOT NULL DEFAULT 0.0,
+                put_wall_strike REAL NOT NULL DEFAULT 0.0,
+                planned_bias TEXT NOT NULL DEFAULT 'TWO_WAY',
+                bull_trigger REAL NOT NULL DEFAULT 0.0,
+                bear_trigger REAL NOT NULL DEFAULT 0.0,
+                max_trades INTEGER NOT NULL DEFAULT 3,
+                pre_plan_notes TEXT NOT NULL DEFAULT '',
+                post_market_notes TEXT NOT NULL DEFAULT '',
+                actual_open REAL NOT NULL DEFAULT 0.0,
+                actual_high REAL NOT NULL DEFAULT 0.0,
+                actual_low REAL NOT NULL DEFAULT 0.0,
+                actual_close REAL NOT NULL DEFAULT 0.0,
+                actual_trades_count INTEGER NOT NULL DEFAULT 0,
+                actual_pnl_rupees REAL NOT NULL DEFAULT 0.0,
+                plan_match_status TEXT NOT NULL DEFAULT 'WAITING_FOR_DATA',
+                market_vs_plan_detail TEXT NOT NULL DEFAULT '',
+                trade_vs_plan_detail TEXT NOT NULL DEFAULT '',
+                alignment_score INTEGER NOT NULL DEFAULT 100,
+                updated_ts INTEGER NOT NULL DEFAULT 0,
+                UNIQUE(session_date, underlying)
+            );
             """
         )
         self.conn.commit()
@@ -1155,14 +1189,19 @@ def update_and_write_setup_journal(
         )
     blocker_summary.sort(key=lambda x: (x["missed_winners"], x["times_blocked"]), reverse=True)
 
-    # Step 4: Write Markdown & CSV Trading Journal Files under doc/ folder
+    # Step 4: Evaluate Pre-Market Plan vs. Actual Market & Trade Deviation
+    pre_plan_eval = evaluate_pre_market_vs_actual(store, session_date, underlying, report)
+
+    # Step 5: Write Markdown & CSV Trading Journal Files under doc/ folder
     doc_dir = BASE_DIR / "doc"
     doc_dir.mkdir(parents=True, exist_ok=True)
     md_path = doc_dir / f"trading_journal_{session_date}.md"
     latest_md_path = doc_dir / "TRADING_JOURNAL.md"
     csv_path = doc_dir / "trading_journal.csv"
 
-    _write_journal_files(session_date, underlying, entries, blocker_summary, md_path, latest_md_path, csv_path)
+    _write_journal_files(
+        session_date, underlying, entries, blocker_summary, pre_plan_eval, md_path, latest_md_path, csv_path
+    )
 
     return {
         "session_date": session_date,
@@ -1170,7 +1209,395 @@ def update_and_write_setup_journal(
         "journal_md_path": str(latest_md_path),
         "journal_csv_path": str(csv_path),
         "blocker_summary": blocker_summary,
+        "pre_plan": pre_plan_eval,
         "entries": entries[:25],
+    }
+
+
+def classify_gap_and_vix(
+    underlying: str, pre_open_spot: float, pdc: float, india_vix: float
+) -> Tuple[float, str, str]:
+    """Classify opening gap regime and India VIX regime for pre-market planning."""
+    gap_pts = round(pre_open_spot - pdc, 2) if (pre_open_spot > 0 and pdc > 0) else 0.0
+    abs_gap = abs(gap_pts)
+    flat_thresh = 120.0 if underlying == "BANKNIFTY" else 50.0
+    mod_thresh = 300.0 if underlying == "BANKNIFTY" else 135.0
+
+    if abs_gap <= flat_thresh:
+        gap_regime = f"FLAT_OPEN ({gap_pts:+.1f} pts — Best for Breakout)"
+    elif abs_gap <= mod_thresh:
+        direction = "GAP_UP" if gap_pts > 0 else "GAP_DOWN"
+        gap_regime = f"MODERATE_{direction} ({gap_pts:+.1f} pts — Watch Trapped Round Strike)"
+    else:
+        direction = "GAP_UP" if gap_pts > 0 else "GAP_DOWN"
+        gap_regime = f"HUGE_{direction} ({gap_pts:+.1f} pts — Morning IV Crush Risk! Wait 10:00 AM)"
+
+    if india_vix < 11.5:
+        vix_regime = f"LOW_VOL ({india_vix:.1f} — Book T1 +20% Early)"
+    elif india_vix <= 18.0:
+        vix_regime = f"IDEAL_VOL ({india_vix:.1f} — Standard +25% / +45% Targets)"
+    else:
+        vix_regime = f"HIGH_VOL ({india_vix:.1f} — Cut Lot Size 50%, IV Crush Risk)"
+
+    return gap_pts, gap_regime, vix_regime
+
+
+def save_pre_market_plan(
+    store: SnapshotStore,
+    plan_input: Dict[str, Any],
+    report: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Save or update a daily Pre-Market Plan and immediately evaluate it against actual market/trade data."""
+    cur = store.conn.cursor()
+    session_date = str(
+        plan_input.get("session_date")
+        or (report["session_date"] if report else dt.datetime.now().strftime("%Y-%m-%d"))
+    )
+    underlying = str(
+        plan_input.get("underlying")
+        or (report["underlying"] if report else "NIFTY")
+    ).upper()
+
+    # Fetch existing plan if present so partial updates (like post_market_notes) preserve pre-plan fields
+    cur.execute(
+        "SELECT * FROM daily_pre_market_plans WHERE session_date = ? AND underlying = ? LIMIT 1",
+        (session_date, underlying),
+    )
+    existing = dict(cur.fetchone() or {})
+
+    pdh = float(plan_input.get("pdh", existing.get("pdh", 0.0)) or 0.0)
+    pdl = float(plan_input.get("pdl", existing.get("pdl", 0.0)) or 0.0)
+    pdc = float(plan_input.get("pdc", existing.get("pdc", 0.0)) or 0.0)
+    pre_open_spot = float(plan_input.get("pre_open_spot", existing.get("pre_open_spot", 0.0)) or 0.0)
+    india_vix = float(plan_input.get("india_vix", existing.get("india_vix", 13.5)) or 13.5)
+    call_wall = float(plan_input.get("call_wall_strike", existing.get("call_wall_strike", 0.0)) or 0.0)
+    put_wall = float(plan_input.get("put_wall_strike", existing.get("put_wall_strike", 0.0)) or 0.0)
+    planned_bias = str(plan_input.get("planned_bias", existing.get("planned_bias", "TWO_WAY")) or "TWO_WAY").upper()
+    bull_trigger = float(plan_input.get("bull_trigger", existing.get("bull_trigger", 0.0)) or 0.0)
+    bear_trigger = float(plan_input.get("bear_trigger", existing.get("bear_trigger", 0.0)) or 0.0)
+    max_trades = int(plan_input.get("max_trades", existing.get("max_trades", 3)) or 3)
+    pre_plan_notes = str(plan_input.get("pre_plan_notes", existing.get("pre_plan_notes", ""))).strip()
+    post_market_notes = str(plan_input.get("post_market_notes", existing.get("post_market_notes", ""))).strip()
+
+    gap_pts, gap_regime, vix_regime = classify_gap_and_vix(underlying, pre_open_spot, pdc, india_vix)
+    now_ts = int(time.time())
+
+    cur.execute(
+        """
+        INSERT INTO daily_pre_market_plans (
+            session_date, underlying, pdh, pdl, pdc, pre_open_spot, gap_pts, gap_regime,
+            india_vix, vix_regime, call_wall_strike, put_wall_strike, planned_bias,
+            bull_trigger, bear_trigger, max_trades, pre_plan_notes, post_market_notes, updated_ts
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(session_date, underlying) DO UPDATE SET
+            pdh = excluded.pdh,
+            pdl = excluded.pdl,
+            pdc = excluded.pdc,
+            pre_open_spot = excluded.pre_open_spot,
+            gap_pts = excluded.gap_pts,
+            gap_regime = excluded.gap_regime,
+            india_vix = excluded.india_vix,
+            vix_regime = excluded.vix_regime,
+            call_wall_strike = excluded.call_wall_strike,
+            put_wall_strike = excluded.put_wall_strike,
+            planned_bias = excluded.planned_bias,
+            bull_trigger = excluded.bull_trigger,
+            bear_trigger = excluded.bear_trigger,
+            max_trades = excluded.max_trades,
+            pre_plan_notes = excluded.pre_plan_notes,
+            post_market_notes = excluded.post_market_notes,
+            updated_ts = excluded.updated_ts
+        """,
+        (
+            session_date,
+            underlying,
+            pdh,
+            pdl,
+            pdc,
+            pre_open_spot,
+            gap_pts,
+            gap_regime,
+            india_vix,
+            vix_regime,
+            call_wall,
+            put_wall,
+            planned_bias,
+            bull_trigger,
+            bear_trigger,
+            max_trades,
+            pre_plan_notes,
+            post_market_notes,
+            now_ts,
+        ),
+    )
+    store.conn.commit()
+    return evaluate_pre_market_vs_actual(store, session_date, underlying, report)
+
+
+def evaluate_pre_market_vs_actual(
+    store: SnapshotStore,
+    session_date: str,
+    underlying: str,
+    report: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """
+    Compare today's Pre-Market Plan against actual intraday Spot action, 6/6 Signals, and Executed Trades
+    to highlight where your Pre-Plan matched vs. where your trades deviated.
+    """
+    cur = store.conn.cursor()
+
+    # Check if a pre-market plan exists for today; if not and report exists, seed a smart default baseline
+    cur.execute(
+        "SELECT * FROM daily_pre_market_plans WHERE session_date = ? AND underlying = ? LIMIT 1",
+        (session_date, underlying),
+    )
+    row = cur.fetchone()
+    if not row and report:
+        # Find today's earliest spot_ltp to seed realistic pre-plan levels
+        cur.execute(
+            """
+            SELECT spot_ltp FROM chain_snapshots
+            WHERE session_date = ? AND underlying = ?
+            ORDER BY ts ASC LIMIT 1
+            """,
+            (session_date, underlying),
+        )
+        first_snap = cur.fetchone()
+        open_spot = float(first_snap["spot_ltp"]) if first_snap else float(report["spot_ltp"])
+        step = 100.0 if underlying == "BANKNIFTY" else 50.0
+        default_pdc = round(open_spot - 15.0, 1)
+        default_pdh = round(open_spot + 20.0, 1)
+        default_pdl = round(open_spot - 45.0, 1)
+        default_bull = round(open_spot + 12.0, 1)
+        default_bear = round(open_spot - 18.0, 1)
+        gap_pts, gap_regime, vix_regime = classify_gap_and_vix(underlying, open_spot, default_pdc, 13.4)
+        cur.execute(
+            """
+            INSERT OR IGNORE INTO daily_pre_market_plans (
+                session_date, underlying, pdh, pdl, pdc, pre_open_spot, gap_pts, gap_regime,
+                india_vix, vix_regime, call_wall_strike, put_wall_strike, planned_bias,
+                bull_trigger, bear_trigger, max_trades, pre_plan_notes, post_market_notes, updated_ts
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                session_date,
+                underlying,
+                default_pdh,
+                default_pdl,
+                default_pdc,
+                open_spot,
+                gap_pts,
+                gap_regime,
+                13.4,
+                vix_regime,
+                float(report.get("resistance_strike") or (round(open_spot / step) * step + step)),
+                float(report.get("support_strike") or (round(open_spot / step) * step)),
+                "BULLISH_ABOVE_TRIGGER",
+                default_bull,
+                default_bear,
+                3,
+                f"Buy ATM CE only if Spot holds above {default_bull:.0f} with 24500 CE Short Covering; Buy PE only below {default_bear:.0f}.",
+                "",
+                int(time.time()),
+            ),
+        )
+        store.conn.commit()
+        cur.execute(
+            "SELECT * FROM daily_pre_market_plans WHERE session_date = ? AND underlying = ? LIMIT 1",
+            (session_date, underlying),
+        )
+        row = cur.fetchone()
+
+    if not row:
+        return {"current": None, "history": []}
+
+    plan = dict(row)
+
+    # 1. Actual Intraday Spot High / Low / Open / Close from chain_snapshots
+    cur.execute(
+        """
+        SELECT MIN(spot_ltp) AS low_spot, MAX(spot_ltp) AS high_spot, COUNT(*) AS cnt
+        FROM chain_snapshots
+        WHERE session_date = ? AND underlying = ?
+        """,
+        (session_date, underlying),
+    )
+    agg = cur.fetchone()
+    cur.execute(
+        "SELECT spot_ltp FROM chain_snapshots WHERE session_date = ? AND underlying = ? ORDER BY ts ASC LIMIT 1",
+        (session_date, underlying),
+    )
+    first_r = cur.fetchone()
+    cur.execute(
+        "SELECT spot_ltp FROM chain_snapshots WHERE session_date = ? AND underlying = ? ORDER BY ts DESC LIMIT 1",
+        (session_date, underlying),
+    )
+    last_r = cur.fetchone()
+
+    actual_open = float(first_r["spot_ltp"]) if first_r else float(plan["pre_open_spot"])
+    actual_close = float(last_r["spot_ltp"]) if last_r else actual_open
+    actual_high = float(agg["high_spot"]) if (agg and agg["high_spot"] is not None) else actual_close
+    actual_low = float(agg["low_spot"]) if (agg and agg["low_spot"] is not None) else actual_close
+
+    # 2. Actual Trades Taken Today
+    cur.execute(
+        """
+        SELECT option_type, entry_price, exit_price, pnl_rupees, status, exit_reason
+        FROM paper_trades
+        WHERE session_date = ? AND underlying = ?
+        """,
+        (session_date, underlying),
+    )
+    trades = [dict(t) for t in cur.fetchall()]
+    trades_count = len(trades)
+    total_pnl_rs = round(sum(float(t.get("pnl_rupees") or 0.0) for t in trades), 2)
+    ce_trades = sum(1 for t in trades if t.get("option_type") == "CE")
+    pe_trades = sum(1 for t in trades if t.get("option_type") == "PE")
+
+    # 3. 6/6 Signals Triggered Today in setup_journal
+    cur.execute(
+        """
+        SELECT option_type, COUNT(*) AS cnt
+        FROM setup_journal
+        WHERE session_date = ? AND underlying = ? AND score = 6
+        GROUP BY option_type
+        """,
+        (session_date, underlying),
+    )
+    sig_counts = {r["option_type"]: int(r["cnt"]) for r in cur.fetchall()}
+    ce_6_signals = sig_counts.get("CE", 0)
+    pe_6_signals = sig_counts.get("PE", 0)
+
+    # 4. Evaluate Market vs. Pre-Planned Triggers
+    bull_trig = float(plan.get("bull_trigger") or 0.0)
+    bear_trig = float(plan.get("bear_trigger") or 0.0)
+    pdh = float(plan.get("pdh") or 0.0)
+    pdl = float(plan.get("pdl") or 0.0)
+
+    bull_crossed = bull_trig > 0 and actual_high >= bull_trig
+    bear_crossed = bear_trig > 0 and actual_low <= bear_trig
+    pdh_broken = pdh > 0 and actual_high >= pdh
+    pdl_broken = pdl > 0 and actual_low <= pdl
+
+    mkt_parts: List[str] = []
+    if bull_crossed:
+        mkt_parts.append(f"✅ Bull Trigger ({bull_trig:.0f}) CROSSED (High reached {actual_high:.1f})")
+    elif bull_trig > 0:
+        mkt_parts.append(f"⏳ Bull Trigger ({bull_trig:.0f}) NOT crossed (High {actual_high:.1f})")
+
+    if bear_crossed:
+        mkt_parts.append(f"🔻 Bear Trigger ({bear_trig:.0f}) CROSSED (Low reached {actual_low:.1f})")
+    elif bear_trig > 0:
+        mkt_parts.append(f"🛡️ Bear Trigger ({bear_trig:.0f}) held (Low {actual_low:.1f})")
+
+    if pdh_broken:
+        mkt_parts.append(f"Broke above PDH ({pdh:.0f})")
+    if pdl_broken:
+        mkt_parts.append(f"Broke below PDL ({pdl:.0f})")
+
+    market_vs_plan_detail = " | ".join(mkt_parts) if mkt_parts else f"Range: {actual_low:.1f} - {actual_high:.1f}"
+
+    # 5. Evaluate Trader Execution vs. Pre-Plan (Alignment & Deviations)
+    score = 100
+    deviations: List[str] = []
+    matches: List[str] = []
+    bias = str(plan.get("planned_bias") or "TWO_WAY").upper()
+    max_trades = int(plan.get("max_trades") or 3)
+
+    if trades_count > max_trades:
+        score -= 30
+        deviations.append(f"❌ OVERTRADED: Took {trades_count} trades vs planned max {max_trades}")
+    else:
+        matches.append(f"✔️ Trade Count Discipline ({trades_count}/{max_trades} max)")
+
+    if "BULLISH" in bias and pe_trades > 0:
+        score -= 30
+        deviations.append(f"❌ BIAS DEVIATION: Planned {bias}, but took {pe_trades} PE trade(s)")
+    if "BEARISH" in bias and ce_trades > 0:
+        score -= 30
+        deviations.append(f"❌ BIAS DEVIATION: Planned {bias}, but took {ce_trades} CE trade(s)")
+    if "NO_TRADE" in bias and trades_count > 0:
+        score -= 35
+        deviations.append(f"❌ CHOP DEVIATION: Planned NO_TRADE_CHOP, but took {trades_count} trade(s)")
+
+    if ce_trades > 0 and bull_trig > 0 and not bull_crossed:
+        score -= 20
+        deviations.append(f"⚠️ EARLY CE ENTRY: Bought CE before Spot crossed Bull Trigger ({bull_trig:.0f})")
+    elif ce_trades > 0 and bull_crossed:
+        matches.append(f"✔️ Bought CE after Bull Trigger ({bull_trig:.0f}) confirmed")
+
+    if pe_trades > 0 and bear_trig > 0 and not bear_crossed:
+        score -= 20
+        deviations.append(f"⚠️ EARLY PE ENTRY: Bought PE before Spot broke Bear Trigger ({bear_trig:.0f})")
+    elif pe_trades > 0 and bear_crossed:
+        matches.append(f"✔️ Bought PE after Bear Trigger ({bear_trig:.0f}) confirmed")
+
+    if (bull_crossed and ce_6_signals > 0 and ce_trades == 0) or (bear_crossed and pe_6_signals > 0 and pe_trades == 0):
+        score -= 15
+        deviations.append(
+            f"💡 MISSED PLANNED SETUP: Pre-plan trigger + 6/6 Signal fired (CE:{ce_6_signals}, PE:{pe_6_signals}), but 0 trades executed"
+        )
+    elif (bull_crossed and ce_6_signals > 0 and ce_trades > 0) or (bear_crossed and pe_6_signals > 0 and pe_trades > 0):
+        matches.append("🎯 100% PLAN + 6/6 SIGNAL ALIGNMENT")
+
+    score = max(0, min(100, score))
+
+    if deviations:
+        plan_match_status = f"DEVIATED ({score}% Discipline)" if score < 85 else f"PARTIAL MATCH ({score}%)"
+        trade_vs_plan_detail = " | ".join(deviations + matches)
+    else:
+        plan_match_status = f"PLAN FOLLOWED ({score}% Discipline)"
+        trade_vs_plan_detail = " | ".join(matches) if matches else "No rule deviations."
+
+    cur.execute(
+        """
+        UPDATE daily_pre_market_plans
+        SET actual_open = ?, actual_high = ?, actual_low = ?, actual_close = ?,
+            actual_trades_count = ?, actual_pnl_rupees = ?, plan_match_status = ?,
+            market_vs_plan_detail = ?, trade_vs_plan_detail = ?, alignment_score = ?
+        WHERE session_date = ? AND underlying = ?
+        """,
+        (
+            actual_open,
+            actual_high,
+            actual_low,
+            actual_close,
+            trades_count,
+            total_pnl_rs,
+            plan_match_status,
+            market_vs_plan_detail,
+            trade_vs_plan_detail,
+            score,
+            session_date,
+            underlying,
+        ),
+    )
+    store.conn.commit()
+
+    cur.execute(
+        "SELECT * FROM daily_pre_market_plans WHERE session_date = ? AND underlying = ? LIMIT 1",
+        (session_date, underlying),
+    )
+    updated_current = dict(cur.fetchone() or plan)
+
+    def _enrich_plan_dict(d: Dict[str, Any]) -> Dict[str, Any]:
+        pdc_val = float(d.get("pdc") or 0.0)
+        gap_pts_val = float(d.get("gap_points") or 0.0)
+        d["gap_type"] = d.get("gap_regime") or "UNCLASSIFIED"
+        d["gap_pct"] = round((gap_pts_val / pdc_val) * 100.0, 2) if pdc_val > 0 else 0.0
+        return d
+
+    updated_current = _enrich_plan_dict(updated_current)
+
+    cur.execute(
+        "SELECT * FROM daily_pre_market_plans ORDER BY session_date DESC, updated_ts DESC LIMIT 15"
+    )
+    history = [_enrich_plan_dict(dict(r)) for r in cur.fetchall()]
+
+    return {
+        "current": updated_current,
+        "today": updated_current,
+        "history": history,
     }
 
 
@@ -1179,6 +1606,7 @@ def _write_journal_files(
     underlying: str,
     entries: List[Dict[str, Any]],
     blocker_summary: List[Dict[str, Any]],
+    pre_plan_eval: Dict[str, Any],
     md_path: Path,
     latest_md_path: Path,
     csv_path: Path,
@@ -1188,16 +1616,45 @@ def _write_journal_files(
         f"# LearnOT Daily Trading & Fine-Tuning Journal ({session_date} — {underlying})",
         "",
         "> **How to Use This Journal:**",
-        "> Whenever at least **3 out of 6 conditions (`Score >= 3/6`)** are met on a 3-minute snapshot, this journal automatically records:",
-        "> 1. **✅ What Was Good Today:** Which conditions aligned in your favor (with exact numbers).",
-        "> 2. **❌ Why It Did Not Meet 6/6:** Which specific rule(s) failed (e.g., PCR, 15m dOI, Volume Burst, or Option VWAP) with exact live numbers.",
-        "> 3. **📈 What Happened Next (Outcome Tracking):** How high the option premium moved *after* that snapshot (`Max LTP After` & `Max Gain %`) so you can decide whether to fine-tune a strict condition or keep it.",
+        "> 1. **🌅 Section 0 (Pre-Market Plan vs. Post-Market Deviation):** Compares your morning pre-plan (PDH/PDL, Gap, Bull/Bear Triggers, Bias) against actual market action and your executed trades.",
+        "> 2. **✅ What Was Good Today (`Score >= 3/6`):** Which conditions aligned in your favor (with exact numbers).",
+        "> 3. **❌ Why It Did Not Meet 6/6:** Which specific rule(s) failed (e.g., PCR, 15m dOI, Volume Burst, or Option VWAP) with exact live numbers.",
+        "> 4. **📈 What Happened Next (Outcome Tracking):** How high the option premium moved *after* that snapshot (`Max LTP After` & `Max Gain %`) so you can decide whether to fine-tune a strict condition or keep it.",
         "",
         "---",
         "",
-        "## 1. Fine-Tuning Rule Blocker Summary (Which Condition Held Back Good Trades Today?)",
+        "## 0. Pre-Market Plan vs. Post-Market Deviation Review",
         "",
     ]
+
+    cur_plan = (pre_plan_eval or {}).get("current")
+    if cur_plan:
+        safe_mkt_detail = str(cur_plan.get("market_vs_plan_detail") or "--").replace(" | ", " ;; ")
+        safe_trd_detail = str(cur_plan.get("trade_vs_plan_detail") or "--").replace(" | ", " ;; ")
+        safe_pre_note = str(cur_plan.get("pre_plan_notes") or "None").replace("|", "/")
+        safe_post_note = str(cur_plan.get("post_market_notes") or "Add reflection in Web UI Portal").replace("|", "/")
+        md_lines.extend(
+            [
+                f"| Metric | Morning Pre-Plan (`09:08 AM`) | Actual Intraday Outcome (`09:15 AM – 03:30 PM`) | Match / Deviation Verdict |",
+                f"| :--- | :--- | :--- | :--- |",
+                f"| **Opening & Range** | Pre-Open: `{cur_plan['pre_open_spot']:.1f}` (PDC `{cur_plan['pdc']:.1f}`, PDH `{cur_plan['pdh']:.1f}`, PDL `{cur_plan['pdl']:.1f}`) | Open `{cur_plan['actual_open']:.1f}` / High `{cur_plan['actual_high']:.1f}` / Low `{cur_plan['actual_low']:.1f}` / Last `{cur_plan['actual_close']:.1f}` | `{cur_plan['gap_regime']}` |",
+                f"| **Volatility & OI Walls** | `{cur_plan['vix_regime']}` / Walls: `{cur_plan['put_wall_strike']:.0f} PE` – `{cur_plan['call_wall_strike']:.0f} CE` | Spot moved `{cur_plan['actual_high'] - cur_plan['actual_low']:.1f}` pts intraday | `{safe_mkt_detail}` |",
+                f"| **Bias & Trigger Levels** | Bias: **`{cur_plan['planned_bias']}`** (Bull `>{cur_plan['bull_trigger']:.0f}` / Bear `<{cur_plan['bear_trigger']:.0f}`) | Trades Taken: **`{cur_plan['actual_trades_count']}/{cur_plan['max_trades']}`** (PnL: `₹{cur_plan['actual_pnl_rupees']:+.2f}`) | **`{cur_plan['plan_match_status']}`** |",
+                f"| **Execution vs. Plan** | *Morning Note:* {safe_pre_note} | *Post-Market Note:* {safe_post_note} | {safe_trd_detail} |",
+                "",
+            ]
+        )
+    else:
+        md_lines.append("*No Pre-Market Plan recorded yet for today.*")
+
+    md_lines.extend(
+        [
+            "---",
+            "",
+            "## 1. Fine-Tuning Rule Blocker Summary (Which Condition Held Back Good Trades Today?)",
+            "",
+        ]
+    )
 
     if not blocker_summary:
         md_lines.append("*No near-miss (`3/6` to `5/6`) setups recorded yet in this session.*")
@@ -2031,6 +2488,28 @@ def main() -> int:
     if args.demo or args.test_alert:
         print("\n[*] Running 3-Step Trapped-Seller Gamma Blast Simulation (3-Min NSE OI Cycle)...")
         demo_steps = generate_demo_snapshots(args.underlying)
+        demo_date = dt.datetime.fromtimestamp(demo_steps[0][0]).strftime("%Y-%m-%d")
+        # Seed a realistic morning Pre-Market Plan before running snapshots
+        save_pre_market_plan(
+            store=store,
+            plan_input={
+                "session_date": demo_date,
+                "underlying": args.underlying,
+                "pdh": 24520.0,
+                "pdl": 24390.0,
+                "pdc": 24470.0,
+                "pre_open_spot": 24492.0,
+                "india_vix": 13.8,
+                "call_wall_strike": 24500.0,
+                "put_wall_strike": 24400.0,
+                "planned_bias": "BULLISH_ABOVE_TRIGGER",
+                "bull_trigger": 24510.0,
+                "bear_trigger": 24440.0,
+                "max_trades": 2,
+                "pre_plan_notes": "Buy ATM 24500 CE only if Spot crosses 24510 and 24500 Call Writers start covering (3m dOI < 0).",
+                "post_market_notes": "Waited patiently through 09:21 AM 5/6 setup; entered on 09:24 AM 6/6 breakout above 24510.",
+            },
+        )
         last_report = None
         for idx, (step_ts, chain_resp, synth_resp) in enumerate(demo_steps, start=1):
             print(f"\n>>> Simulation Snapshot {idx}/{len(demo_steps)}:")

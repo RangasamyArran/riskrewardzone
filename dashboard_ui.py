@@ -36,6 +36,8 @@ from option_chain_analyzer import (
     check_indian_market_hours,
     format_whatsapp_setup_message,
     generate_demo_snapshots,
+    save_pre_market_plan,
+    update_and_write_setup_journal,
 )
 
 
@@ -79,6 +81,28 @@ class AnalyzerAppState:
             db_file.unlink()
         self.demo_store = SnapshotStore(db_file)
         self.demo_scenarios = self._build_extended_demo(underlying)
+        scale = 2.0 if underlying == "BANKNIFTY" else 1.0
+        demo_date = dt.datetime.fromtimestamp(self.demo_scenarios[0][0]).strftime("%Y-%m-%d")
+        save_pre_market_plan(
+            store=self.demo_store,
+            plan_input={
+                "session_date": demo_date,
+                "underlying": underlying,
+                "pdh": round(24520.0 * scale, 2),
+                "pdl": round(24390.0 * scale, 2),
+                "pdc": round(24470.0 * scale, 2),
+                "pre_open_spot": round(24492.0 * scale, 2),
+                "india_vix": 13.8,
+                "call_wall_strike": round(24500.0 * scale, 2),
+                "put_wall_strike": round(24400.0 * scale, 2),
+                "planned_bias": "BULLISH_ABOVE_TRIGGER",
+                "bull_trigger": round(24510.0 * scale, 2),
+                "bear_trigger": round(24440.0 * scale, 2),
+                "max_trades": 2,
+                "pre_plan_notes": f"Buy ATM {int(24500 * scale)} CE only if Spot crosses {int(24510 * scale)} and Call Writers panic (SHORT_COVERING).",
+                "post_market_notes": "Waited for 6/6 confirmation before entering.",
+            },
+        )
         self.demo_step_idx = 0
         self.last_report = None
         self.last_whatsapp_result = None
@@ -319,6 +343,19 @@ class AnalyzerAppState:
                     (cur_ltp, pnl_pts, pnl_rs, t["id"]),
                 )
         store.conn.commit()
+        report["journal"] = update_and_write_setup_journal(store, report, min_score=3)
+
+    def save_pre_plan(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Save or update the daily Pre-Market Plan and Post-Market Reflection notes, and re-verify deviation."""
+        if not self.last_report:
+            self.step_or_poll(advance_demo=False)
+        store = self.get_active_store()
+        save_pre_market_plan(store, payload, self.last_report)
+        if self.last_report:
+            self.last_report["journal"] = update_and_write_setup_journal(
+                store, self.last_report, min_score=3
+            )
+        return self._serialize_state(store)
 
     def create_paper_trade(self, option_type: str, offset: str = "ATM") -> Dict[str, Any]:
         """Place a paper trade (and route to OpenAlgo if in LIVE_OPENALGO + Analyze Mode)."""
@@ -392,6 +429,7 @@ class AnalyzerAppState:
             ),
         )
         store.conn.commit()
+        report["journal"] = update_and_write_setup_journal(store, report, min_score=3)
         return self._serialize_state(store)
 
     def close_paper_trade(self, trade_id: int) -> Dict[str, Any]:
@@ -407,6 +445,10 @@ class AnalyzerAppState:
             (now_ts, trade_id),
         )
         store.conn.commit()
+        if self.last_report:
+            self.last_report["journal"] = update_and_write_setup_journal(
+                store, self.last_report, min_score=3
+            )
         return self._serialize_state(store)
 
     def _serialize_state(self, store: SnapshotStore) -> Dict[str, Any]:
@@ -915,6 +957,109 @@ INDEX_HTML = r"""<!DOCTYPE html>
       </div>
     </div>
 
+    <!-- Daily Pre-Market Plan & Post-Market Deviation Portal -->
+    <div class="card" style="margin-bottom:16px; border-color: rgba(6, 182, 212, 0.45);">
+      <div class="card-header">
+        <span>🌅 Daily Pre-Market Plan &amp; Post-Market Deviation Portal (Morning 09:00 AM Setup &rarr; 03:30 PM Audit)</span>
+        <div style="display:flex; gap:8px; align-items:center;">
+          <span id="prePlanStatusBadge" class="badge badge-demo">NO PRE-PLAN SAVED TODAY</span>
+          <button type="button" onclick="autoFillPrePlan()" title="Auto-fill levels from current Option Chain">⚡ Auto-Fill From Chain</button>
+          <button type="button" class="btn-primary" onclick="savePrePlan()">💾 Save Pre-Plan &amp; Verify Deviation</button>
+        </div>
+      </div>
+
+      <!-- Morning Pre-Plan Form Grid -->
+      <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(155px, 1fr)); gap:10px; margin-bottom:12px;">
+        <div>
+          <label style="font-size:11px; color:var(--muted); display:block; margin-bottom:3px;">Prev Day High (PDH)</label>
+          <input type="number" step="0.05" id="ppPdh" placeholder="e.g. 24560" style="width:100%;" />
+        </div>
+        <div>
+          <label style="font-size:11px; color:var(--muted); display:block; margin-bottom:3px;">Prev Day Low (PDL)</label>
+          <input type="number" step="0.05" id="ppPdl" placeholder="e.g. 24380" style="width:100%;" />
+        </div>
+        <div>
+          <label style="font-size:11px; color:var(--muted); display:block; margin-bottom:3px;">Prev Day Close (PDC)</label>
+          <input type="number" step="0.05" id="ppPdc" placeholder="e.g. 24450" style="width:100%;" />
+        </div>
+        <div>
+          <label style="font-size:11px; color:var(--muted); display:block; margin-bottom:3px;">09:08 Pre-Open Spot</label>
+          <input type="number" step="0.05" id="ppPreOpen" placeholder="e.g. 24485" style="width:100%;" />
+        </div>
+        <div>
+          <label style="font-size:11px; color:var(--muted); display:block; margin-bottom:3px;">India VIX</label>
+          <input type="number" step="0.05" id="ppVix" placeholder="e.g. 13.8" style="width:100%;" />
+        </div>
+        <div>
+          <label style="font-size:11px; color:var(--muted); display:block; margin-bottom:3px;">Call Wall (CE Res)</label>
+          <input type="number" step="50" id="ppCallWall" placeholder="e.g. 24600" style="width:100%;" />
+        </div>
+        <div>
+          <label style="font-size:11px; color:var(--muted); display:block; margin-bottom:3px;">Put Wall (PE Sup)</label>
+          <input type="number" step="50" id="ppPutWall" placeholder="e.g. 24400" style="width:100%;" />
+        </div>
+      </div>
+
+      <div style="display:grid; grid-template-columns: 1.3fr 0.8fr 0.8fr 0.6fr 1.5fr 1.5fr; gap:10px; margin-bottom:12px;">
+        <div>
+          <label style="font-size:11px; color:var(--muted); display:block; margin-bottom:3px;">Morning Planned Bias</label>
+          <select id="ppBias" style="width:100%;">
+            <option value="TWO_WAY">TWO_WAY (Play Bull or Bear Trigger)</option>
+            <option value="BULLISH_ABOVE_TRIGGER">BULLISH_ABOVE_TRIGGER (Buy CE Only)</option>
+            <option value="BEARISH_BELOW_TRIGGER">BEARISH_BELOW_TRIGGER (Buy PE Only)</option>
+            <option value="NO_TRADE_CHOP">NO_TRADE_CHOP (Sit Out / Sideways)</option>
+          </select>
+        </div>
+        <div>
+          <label style="font-size:11px; color:#34d399; display:block; margin-bottom:3px;">Bull Trigger Spot (&ge;)</label>
+          <input type="number" step="0.05" id="ppBullTrig" placeholder="Buy CE above..." style="width:100%;" />
+        </div>
+        <div>
+          <label style="font-size:11px; color:#fb7185; display:block; margin-bottom:3px;">Bear Trigger Spot (&le;)</label>
+          <input type="number" step="0.05" id="ppBearTrig" placeholder="Buy PE below..." style="width:100%;" />
+        </div>
+        <div>
+          <label style="font-size:11px; color:var(--muted); display:block; margin-bottom:3px;">Max Trades</label>
+          <input type="number" step="1" min="0" max="10" id="ppMaxTrades" value="2" style="width:100%;" />
+        </div>
+        <div>
+          <label style="font-size:11px; color:#93c5fd; display:block; margin-bottom:3px;">Morning Pre-Plan Notes (09:05 AM)</label>
+          <input type="text" id="ppPreNotes" placeholder="e.g. Wait for 24500 CE writers to panic above PDH..." style="width:100%;" />
+        </div>
+        <div>
+          <label style="font-size:11px; color:#fbbf24; display:block; margin-bottom:3px;">Post-Market Reflection / Correction (03:35 PM)</label>
+          <input type="text" id="ppPostNotes" placeholder="e.g. Followed trigger well / Took 1 early trade before VWAP..." style="width:100%;" />
+        </div>
+      </div>
+
+      <!-- Live Pre-Plan vs Actual Market & Trade Deviation Verdict Banner -->
+      <div id="prePlanComparisonBox" style="padding:10px 14px; margin-bottom:12px; border-radius:8px; background:rgba(15,23,42,0.85); border:1px solid var(--border); font-size:12px;">
+        Enter your morning levels above (or click <b>⚡ Auto-Fill From Chain</b>) and click <b>💾 Save Pre-Plan &amp; Verify Deviation</b> to track how your trades match your plan.
+      </div>
+
+      <!-- Multi-Day Pre-Plan vs Actual Deviation History Table -->
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th style="text-align:left">Date</th>
+              <th style="text-align:left">Gap &amp; VIX Regime</th>
+              <th style="text-align:left">Planned Bias</th>
+              <th>PDH / PDL</th>
+              <th>Bull / Bear Trigger</th>
+              <th>Actual High / Low / Close</th>
+              <th>Trades (Max)</th>
+              <th>Actual PnL (₹)</th>
+              <th style="text-align:left">Plan vs Trade Verdict (Score)</th>
+              <th style="text-align:left">Market vs Plan &amp; Deviation Details</th>
+              <th style="text-align:left">Morning / Post-Market Notes</th>
+            </tr>
+          </thead>
+          <tbody id="prePlanTableBody"></tbody>
+        </table>
+      </div>
+    </div>
+
     <!-- Setup & Fine-Tuning Journal (Score >= 3/6) -->
     <div class="card" style="margin-bottom:16px;">
       <div class="card-header">
@@ -978,6 +1123,8 @@ INDEX_HTML = r"""<!DOCTYPE html>
 
   <script>
     let autoRefreshTimer = null;
+    let latestReportCache = null;
+    let prePlanFormInitializedForDate = null;
 
     function fmtNum(n, dec = 2) {
       if (n === null || n === undefined || isNaN(n)) return "--";
@@ -1007,6 +1154,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
     async function changeConfig() {
       const mode = document.getElementById("modeSelect").value;
       const underlying = document.getElementById("underlyingSelect").value;
+      prePlanFormInitializedForDate = null;
       const data = await apiCall("/api/config", "POST", { mode, underlying });
       renderState(data);
     }
@@ -1015,6 +1163,87 @@ INDEX_HTML = r"""<!DOCTYPE html>
       const apiKey = document.getElementById("apiKeyInput").value.trim();
       const data = await apiCall("/api/config", "POST", { api_key: apiKey, mode: apiKey ? "LIVE_OPENALGO" : "DEMO" });
       document.getElementById("apiKeyInput").value = "";
+      renderState(data);
+    }
+
+    function autoFillPrePlan() {
+      if (!latestReportCache) return;
+      const rep = latestReportCache;
+      const spot = Number(rep.spot_ltp || 0);
+      const step = rep.underlying === "BANKNIFTY" ? 100 : 50;
+      const atm = Number(rep.atm_strike || spot);
+      const resStrike = Number(rep.resistance_strike || (atm + step));
+      const supStrike = Number(rep.support_strike || (atm - step));
+
+      // Estimate avg ATM IV as VIX proxy if VIX not entered
+      let atmIv = 13.5;
+      for (const r of (rep.strikes || [])) {
+        if (Math.abs(r.strike - atm) < 0.01) {
+          atmIv = Number(((r.ce.implied_volatility || 13.5) + (r.pe.implied_volatility || 13.5)) / 2).toFixed(2);
+          break;
+        }
+      }
+
+      if (!document.getElementById("ppPdh").value || Number(document.getElementById("ppPdh").value) === 0) {
+        document.getElementById("ppPdh").value = (spot + step * 0.6).toFixed(2);
+      }
+      if (!document.getElementById("ppPdl").value || Number(document.getElementById("ppPdl").value) === 0) {
+        document.getElementById("ppPdl").value = (spot - step * 1.2).toFixed(2);
+      }
+      if (!document.getElementById("ppPdc").value || Number(document.getElementById("ppPdc").value) === 0) {
+        document.getElementById("ppPdc").value = (spot - step * 0.3).toFixed(2);
+      }
+      document.getElementById("ppPreOpen").value = spot.toFixed(2);
+      if (!document.getElementById("ppVix").value || Number(document.getElementById("ppVix").value) === 0) {
+        document.getElementById("ppVix").value = atmIv;
+      }
+      document.getElementById("ppCallWall").value = resStrike;
+      document.getElementById("ppPutWall").value = supStrike;
+      document.getElementById("ppBullTrig").value = atm.toFixed(2);
+      document.getElementById("ppBearTrig").value = (atm - step * 0.5).toFixed(2);
+      if (!document.getElementById("ppPreNotes").value) {
+        document.getElementById("ppPreNotes").value =
+          `Buy ATM CE above ${atm} if Call Writers cover; Buy PE below ${atm - step * 0.5} if Put Wall unwinds.`;
+      }
+    }
+
+    function populatePrePlanInputs(plan) {
+      if (!plan) return;
+      document.getElementById("ppPdh").value = plan.pdh || "";
+      document.getElementById("ppPdl").value = plan.pdl || "";
+      document.getElementById("ppPdc").value = plan.pdc || "";
+      document.getElementById("ppPreOpen").value = plan.pre_open_spot || "";
+      document.getElementById("ppVix").value = plan.india_vix || "";
+      document.getElementById("ppCallWall").value = plan.call_wall_strike || "";
+      document.getElementById("ppPutWall").value = plan.put_wall_strike || "";
+      document.getElementById("ppBias").value = plan.planned_bias || "TWO_WAY";
+      document.getElementById("ppBullTrig").value = plan.bull_trigger || "";
+      document.getElementById("ppBearTrig").value = plan.bear_trigger || "";
+      document.getElementById("ppMaxTrades").value = plan.max_trades !== undefined ? plan.max_trades : 2;
+      document.getElementById("ppPreNotes").value = plan.pre_plan_notes || "";
+      document.getElementById("ppPostNotes").value = plan.post_market_notes || "";
+    }
+
+    async function savePrePlan() {
+      const payload = {
+        pdh: parseFloat(document.getElementById("ppPdh").value || "0"),
+        pdl: parseFloat(document.getElementById("ppPdl").value || "0"),
+        pdc: parseFloat(document.getElementById("ppPdc").value || "0"),
+        pre_open_spot: parseFloat(document.getElementById("ppPreOpen").value || "0"),
+        india_vix: parseFloat(document.getElementById("ppVix").value || "0"),
+        call_wall_strike: parseFloat(document.getElementById("ppCallWall").value || "0"),
+        put_wall_strike: parseFloat(document.getElementById("ppPutWall").value || "0"),
+        planned_bias: document.getElementById("ppBias").value,
+        bull_trigger: parseFloat(document.getElementById("ppBullTrig").value || "0"),
+        bear_trigger: parseFloat(document.getElementById("ppBearTrig").value || "0"),
+        max_trades: parseInt(document.getElementById("ppMaxTrades").value || "2", 10),
+        pre_plan_notes: document.getElementById("ppPreNotes").value.trim(),
+        post_market_notes: document.getElementById("ppPostNotes").value.trim(),
+      };
+      const data = await apiCall("/api/preplan", "POST", payload);
+      if (data.report && data.report.journal && data.report.journal.pre_plan && data.report.journal.pre_plan.today) {
+        populatePrePlanInputs(data.report.journal.pre_plan.today);
+      }
       renderState(data);
     }
 
@@ -1128,6 +1357,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
 
       const rep = state.report;
       if (!rep) return;
+      latestReportCache = rep;
 
       // KPI Strip
       const spotDiff = rep.spot_ltp - rep.spot_vwap;
@@ -1261,8 +1491,82 @@ INDEX_HTML = r"""<!DOCTYPE html>
         `;
       }).join("");
 
-      // Setup & Fine-Tuning Journal (Score >= 3/6)
+      // Pre-Market Plan & Post-Market Deviation Portal
       const journal = rep.journal || {};
+      const prePlanObj = journal.pre_plan || {};
+      const todayPlan = prePlanObj.today;
+      const planHistory = prePlanObj.history || [];
+      const ppBadge = document.getElementById("prePlanStatusBadge");
+      const ppBox = document.getElementById("prePlanComparisonBox");
+
+      if (todayPlan) {
+        const keyTag = `${todayPlan.session_date}_${todayPlan.underlying}`;
+        if (prePlanFormInitializedForDate !== keyTag) {
+          populatePrePlanInputs(todayPlan);
+          prePlanFormInitializedForDate = keyTag;
+        }
+        const statusStr = String(todayPlan.plan_match_status || "PENDING");
+        if (statusStr.includes("ALIGNED") || statusStr.includes("100%")) {
+          ppBadge.className = "badge badge-sim";
+        } else if (statusStr.includes("DEVIATED")) {
+          ppBadge.className = "badge badge-live";
+        } else {
+          ppBadge.className = "badge badge-demo";
+        }
+        ppBadge.textContent = statusStr;
+
+        ppBox.innerHTML = `
+          <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap:10px;">
+            <div>
+              <div style="color:#93c5fd; font-weight:700; margin-bottom:3px;">1. Morning Context &amp; Pre-Plan (${todayPlan.session_date})</div>
+              <div><b>Gap Regime:</b> ${todayPlan.gap_type} (${todayPlan.gap_pct >= 0 ? '+' : ''}${fmtNum(todayPlan.gap_pct)}%) | <b>VIX Regime:</b> ${todayPlan.vix_regime} (${fmtNum(todayPlan.india_vix)})</div>
+              <div><b>Planned Bias:</b> <span style="color:#22d3ee; font-weight:700">${todayPlan.planned_bias}</span> | <b>Triggers:</b> Bull &ge; ${fmtNum(todayPlan.bull_trigger)} / Bear &le; ${fmtNum(todayPlan.bear_trigger)}</div>
+            </div>
+            <div>
+              <div style="color:#34d399; font-weight:700; margin-bottom:3px;">2. Actual Market Action vs. Pre-Plan</div>
+              <div><b>Session O/H/L/C:</b> ${fmtNum(todayPlan.actual_open)} / <b>${fmtNum(todayPlan.actual_high)}</b> / <b>${fmtNum(todayPlan.actual_low)}</b> / ${fmtNum(todayPlan.actual_close)}</div>
+              <div style="color:#cbd5e1">${todayPlan.market_vs_plan_detail || '--'}</div>
+            </div>
+            <div>
+              <div style="color:#fbbf24; font-weight:700; margin-bottom:3px;">3. Actual Trade Execution vs. Pre-Plan Audit</div>
+              <div><b>Verdict:</b> <b>${todayPlan.plan_match_status}</b> | <b>Trades:</b> ${todayPlan.actual_trades_count}/${todayPlan.max_trades} | <b>PnL:</b> ₹${fmtNum(todayPlan.actual_pnl_rupees)}</div>
+              <div style="color:#cbd5e1">${todayPlan.trade_vs_plan_detail || '--'}</div>
+            </div>
+          </div>
+        `;
+      } else {
+        ppBadge.className = "badge badge-demo";
+        ppBadge.textContent = "NO PRE-PLAN SAVED TODAY";
+      }
+
+      if (planHistory.length === 0) {
+        document.getElementById("prePlanTableBody").innerHTML =
+          `<tr><td colspan="11" style="text-align:center; color:var(--muted); padding:12px;">No daily pre-plans saved yet. Click "⚡ Auto-Fill From Chain" and "💾 Save Pre-Plan & Verify Deviation" above!</td></tr>`;
+      } else {
+        document.getElementById("prePlanTableBody").innerHTML = planHistory.map(p => {
+          const st = String(p.plan_match_status || "");
+          const isDev = st.includes("DEVIATED");
+          const isAligned = st.includes("ALIGNED");
+          const pnl = Number(p.actual_pnl_rupees || 0);
+          return `
+            <tr style="${isDev ? 'background:rgba(244,63,94,0.08);' : (isAligned ? 'background:rgba(16,185,129,0.06);' : '')}">
+              <td style="text-align:left; font-weight:700">${p.session_date}</td>
+              <td style="text-align:left">${p.gap_type} (${p.gap_pct >= 0 ? '+' : ''}${fmtNum(p.gap_pct, 2)}%)<br/><span style="color:var(--muted); font-size:11px;">VIX ${fmtNum(p.india_vix, 1)}: ${p.vix_regime}</span></td>
+              <td style="text-align:left; font-weight:700; color:#22d3ee">${p.planned_bias}</td>
+              <td>${fmtNum(p.pdh, 0)} / ${fmtNum(p.pdl, 0)}</td>
+              <td><span class="pos-green">&ge;${fmtNum(p.bull_trigger, 0)}</span> / <span class="neg-red">&le;${fmtNum(p.bear_trigger, 0)}</span></td>
+              <td>H:${fmtNum(p.actual_high, 0)} L:${fmtNum(p.actual_low, 0)} C:${fmtNum(p.actual_close, 0)}</td>
+              <td>${p.actual_trades_count} / ${p.max_trades}</td>
+              <td class="${pnl >= 0 ? 'pos-green' : 'neg-red'}" style="font-weight:700">${pnl >= 0 ? '+' : ''}₹${fmtNum(pnl)}</td>
+              <td style="text-align:left; font-weight:700; color:${isDev ? '#fb7185' : (isAligned ? '#34d399' : '#fbbf24')}">${p.plan_match_status}</td>
+              <td style="text-align:left; white-space:normal; max-width:340px;"><b>Mkt:</b> ${p.market_vs_plan_detail}<br/><b>Trades:</b> ${p.trade_vs_plan_detail}</td>
+              <td style="text-align:left; white-space:normal; max-width:260px;"><b>AM:</b> ${p.pre_plan_notes || '--'}<br/><b>PM:</b> ${p.post_market_notes || '--'}</td>
+            </tr>
+          `;
+        }).join("");
+      }
+
+      // Setup & Fine-Tuning Journal (Score >= 3/6)
       const jEntries = journal.entries || [];
       const blockers = journal.blocker_summary || [];
       const blockerBanner = document.getElementById("journalBlockerBanner");
@@ -1272,7 +1576,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
             `<div style="margin-top:2px;">• <b>${b.rule}</b> — Failed <b>${b.times_blocked}x</b> | Missed Winners (&ge;+12%): <b class="${b.missed_winners > 0 ? 'neg-red' : 'pos-green'}">${b.missed_winners}</b> | Avg Max Gain After: <b>${b.avg_max_gain_pct >= 0 ? '+' : ''}${fmtNum(b.avg_max_gain_pct, 1)}%</b> &rarr; <span style="color:#cbd5e1">${b.advice}</span></div>`
           ).join("");
       } else {
-        blockerBanner.innerHTML = `💡 <b>Fine-Tuning Tracker Active:</b> Any snapshot scoring <b>3/6, 4/6, 5/6, or 6/6</b> is automatically logged here and to <code>journal/LATEST_JOURNAL.md</code> so you can see which missing condition (e.g., PCR, Volume Burst) blocked profitable moves.`;
+        blockerBanner.innerHTML = `💡 <b>Fine-Tuning Tracker Active:</b> Any snapshot scoring <b>3/6, 4/6, 5/6, or 6/6</b> is automatically logged here and to <code>doc/TRADING_JOURNAL.md</code> so you can see which missing condition (e.g., PCR, Volume Burst) blocked profitable moves.`;
       }
 
       if (jEntries.length === 0) {
@@ -1421,6 +1725,15 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
                 state = APP_STATE.send_manual_whatsapp()
                 self._send_json(state)
                 return
+
+        if parsed.path == "/api/preplan":
+            try:
+                state = APP_STATE.save_pre_plan(data)
+                self._send_json(state)
+            except Exception as exc:
+                APP_STATE.last_error = str(exc)
+                self._send_json(APP_STATE._serialize_state(APP_STATE.get_active_store()))
+            return
 
         if parsed.path == "/api/trade":
             try:
