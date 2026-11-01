@@ -348,10 +348,19 @@ class SnapshotStore:
                 pdl REAL NOT NULL DEFAULT 0.0,
                 pdc REAL NOT NULL DEFAULT 0.0,
                 pre_open_spot REAL NOT NULL DEFAULT 0.0,
+                gift_nifty_gap REAL NOT NULL DEFAULT 0.0,
+                global_sentiment TEXT NOT NULL DEFAULT 'NEUTRAL_MIXED',
+                prev_day_pcr REAL NOT NULL DEFAULT 1.0,
+                fii_flow TEXT NOT NULL DEFAULT 'NEUTRAL_MIXED',
+                event_context TEXT NOT NULL DEFAULT 'NORMAL_DAY',
                 gap_pts REAL NOT NULL DEFAULT 0.0,
                 gap_regime TEXT NOT NULL DEFAULT 'FLAT',
-                india_vix REAL NOT NULL DEFAULT 13.5,
-                vix_regime TEXT NOT NULL DEFAULT 'IDEAL_VOL (12-18)',
+                india_vix REAL NOT NULL DEFAULT 14.5,
+                vix_regime TEXT NOT NULL DEFAULT 'IDEAL_VOL (14-16)',
+                expected_open_type TEXT NOT NULL DEFAULT '',
+                option_buying_env TEXT NOT NULL DEFAULT '',
+                system_premarket_signal TEXT NOT NULL DEFAULT '',
+                system_premarket_reasons TEXT NOT NULL DEFAULT '',
                 call_wall_strike REAL NOT NULL DEFAULT 0.0,
                 put_wall_strike REAL NOT NULL DEFAULT 0.0,
                 planned_bias TEXT NOT NULL DEFAULT 'TWO_WAY',
@@ -375,6 +384,23 @@ class SnapshotStore:
             );
             """
         )
+        # Ensure existing databases get new Pre-Market Sentiment columns seamlessly
+        new_cols = [
+            ("gift_nifty_gap", "REAL NOT NULL DEFAULT 0.0"),
+            ("global_sentiment", "TEXT NOT NULL DEFAULT 'NEUTRAL_MIXED'"),
+            ("prev_day_pcr", "REAL NOT NULL DEFAULT 1.0"),
+            ("fii_flow", "TEXT NOT NULL DEFAULT 'NEUTRAL_MIXED'"),
+            ("event_context", "TEXT NOT NULL DEFAULT 'NORMAL_DAY'"),
+            ("expected_open_type", "TEXT NOT NULL DEFAULT ''"),
+            ("option_buying_env", "TEXT NOT NULL DEFAULT ''"),
+            ("system_premarket_signal", "TEXT NOT NULL DEFAULT ''"),
+            ("system_premarket_reasons", "TEXT NOT NULL DEFAULT ''"),
+        ]
+        for col_name, col_def in new_cols:
+            try:
+                cur.execute(f"ALTER TABLE daily_pre_market_plans ADD COLUMN {col_name} {col_def}")
+            except sqlite3.OperationalError:
+                pass
         self.conn.commit()
 
     def save_snapshot(
@@ -1215,31 +1241,198 @@ def update_and_write_setup_journal(
 
 
 def classify_gap_and_vix(
-    underlying: str, pre_open_spot: float, pdc: float, india_vix: float
+    underlying: str, pre_open_spot: float, pdc: float, india_vix: float, gift_nifty_gap: float = 0.0
 ) -> Tuple[float, str, str]:
     """Classify opening gap regime and India VIX regime for pre-market planning."""
-    gap_pts = round(pre_open_spot - pdc, 2) if (pre_open_spot > 0 and pdc > 0) else 0.0
+    if pre_open_spot > 0 and pdc > 0:
+        gap_pts = round(pre_open_spot - pdc, 2)
+    else:
+        gap_pts = round(gift_nifty_gap, 2)
+
     abs_gap = abs(gap_pts)
-    flat_thresh = 120.0 if underlying == "BANKNIFTY" else 50.0
-    mod_thresh = 300.0 if underlying == "BANKNIFTY" else 135.0
+    flat_thresh = 100.0 if underlying == "BANKNIFTY" else 40.0
+    mod_thresh = 280.0 if underlying == "BANKNIFTY" else 120.0
 
     if abs_gap <= flat_thresh:
-        gap_regime = f"FLAT_OPEN ({gap_pts:+.1f} pts — Best for Breakout)"
+        gap_regime = f"FLAT_OPEN ({gap_pts:+.1f} pts — Coiled Spring Breakout)"
     elif abs_gap <= mod_thresh:
         direction = "GAP_UP" if gap_pts > 0 else "GAP_DOWN"
         gap_regime = f"MODERATE_{direction} ({gap_pts:+.1f} pts — Watch Trapped Round Strike)"
     else:
         direction = "GAP_UP" if gap_pts > 0 else "GAP_DOWN"
-        gap_regime = f"HUGE_{direction} ({gap_pts:+.1f} pts — Morning IV Crush Risk! Wait 10:00 AM)"
+        gap_regime = f"HUGE_{direction} ({gap_pts:+.1f} pts — Profit Booking / Gap-Fade Risk!)"
 
     if india_vix < 11.5:
-        vix_regime = f"LOW_VOL ({india_vix:.1f} — Book T1 +20% Early)"
-    elif india_vix <= 18.0:
-        vix_regime = f"IDEAL_VOL ({india_vix:.1f} — Standard +25% / +45% Targets)"
+        vix_regime = f"LOW_VOL ({india_vix:.1f} < 11.5 — Slow Premiums / Theta Decay Risk)"
+    elif india_vix < 13.5:
+        vix_regime = f"MODERATE_VOL ({india_vix:.1f} — Favourable for Clean Breakouts)"
+    elif india_vix <= 16.5:
+        vix_regime = f"GOLDILOCKS_IV ({india_vix:.1f} in 13.5-16.5 — Ideal for Option Buying!)"
+    elif india_vix <= 19.5:
+        vix_regime = f"ELEVATED_VOL ({india_vix:.1f} — Fast Two-Way Swings, Cut Size)"
     else:
-        vix_regime = f"HIGH_VOL ({india_vix:.1f} — Cut Lot Size 50%, IV Crush Risk)"
+        vix_regime = f"EXTREME_HIGH_IV ({india_vix:.1f} > 19.5 — Better No-Trade / IV Crush Danger!)"
 
     return gap_pts, gap_regime, vix_regime
+
+
+def evaluate_premarket_sentiment_signal(
+    underlying: str,
+    gift_nifty_gap: float,
+    global_sentiment: str,
+    prev_day_pcr: float,
+    india_vix: float,
+    fii_flow: str,
+    event_context: str,
+    gap_pts: float,
+) -> Dict[str, str]:
+    """
+    Quantitative Pre-Market Sentiment Engine:
+    Synthesizes GIFT/SGX Nifty Gap, Global Cues, Previous Day Closing PCR (Reversal vs Trend),
+    India VIX (14-16 Goldilocks vs High-IV No-Trade), FII Overnight Flow, and Event Context
+    into an actionable Pre-Market Opening Forecast & Option Buying Signal.
+    """
+    reasons: List[str] = []
+    eff_gap = gift_nifty_gap if abs(gift_nifty_gap) > 0.01 else gap_pts
+    flat_thresh = 100.0 if underlying == "BANKNIFTY" else 40.0
+    huge_thresh = 280.0 if underlying == "BANKNIFTY" else 120.0
+
+    # 1. India VIX / IV Option Buying Suitability Assessment
+    if event_context == "PRE_EVENT_HIGH_IV" or india_vix > 19.5:
+        option_buying_env = (
+            f"🔴 HIGH-IV DANGER / BETTER NO-TRADE DAY (VIX {india_vix:.1f} / {event_context}: "
+            f"Bloated premiums face severe intraday IV Crush even if Spot moves your way!)"
+        )
+        reasons.append(
+            f"IV / VIX Filter ({india_vix:.1f}): High IV / Pre-Event regime — Option buying carries high IV-crush risk; prefer sitting out or 50% size."
+        )
+    elif 13.5 <= india_vix <= 16.5:
+        option_buying_env = (
+            f"🟢 GOLDILOCKS OPTION BUYING DAY (VIX {india_vix:.1f} in 13.5–16.5 Sweet Spot: "
+            f"No IV bloat, steady Gamma expansion, ideal for +25% / +45% targets!)"
+        )
+        reasons.append(
+            f"IV / VIX Filter ({india_vix:.1f}): Inside 13.5–16.5 Goldilocks zone — Ideal environment for ATM Option Buying."
+        )
+    elif 11.5 <= india_vix < 13.5:
+        option_buying_env = (
+            f"🟢 FAVOURABLE BREAKOUT DAY (VIX {india_vix:.1f}: Fair premiums; wait for Volume Burst >= 1.3x)"
+        )
+        reasons.append(
+            f"IV / VIX Filter ({india_vix:.1f}): Moderate-low IV (11.5–13.5) — Safe from IV crush; requires SHORT_COVERING burst."
+        )
+    elif india_vix < 11.5:
+        option_buying_env = (
+            f"🟡 LOW-VIX THETA TRAP WARNING (VIX {india_vix:.1f} < 11.5: Small intraday range; book quick +15-20% or avoid chop)"
+        )
+        reasons.append(
+            f"IV / VIX Filter ({india_vix:.1f}): Very low VIX (< 11.5) — Market often stays range-bound; Theta decay eats slow trades."
+        )
+    else:
+        option_buying_env = (
+            f"🟡 ELEVATED VOLATILITY (VIX {india_vix:.1f} in 16.5–19.5: Wide stop-hunts; enter strictly near Option VWAP)"
+        )
+        reasons.append(
+            f"IV / VIX Filter ({india_vix:.1f}): Elevated VIX (16.5–19.5) — Fast two-way moves; avoid chasing extended candles."
+        )
+
+    # 2. Previous Day Closing PCR Contrarian / Trend Assessment
+    pcr_reversal_bear = False
+    pcr_reversal_bull = False
+    if prev_day_pcr >= 1.45:
+        pcr_reversal_bear = True
+        reasons.append(
+            f"Prev Day PCR ({prev_day_pcr:.2f} >= 1.45 OVERBOUGHT): Heavy Put writing overcrowding! "
+            f"High probability of profit-booking / bearish reversal if Opening Range Low or VWAP breaks."
+        )
+    elif prev_day_pcr >= 1.15:
+        reasons.append(
+            f"Prev Day PCR ({prev_day_pcr:.2f} in 1.15–1.44): Bullish Put-writing base with room to trend higher."
+        )
+    elif prev_day_pcr <= 0.65:
+        pcr_reversal_bull = True
+        reasons.append(
+            f"Prev Day PCR ({prev_day_pcr:.2f} <= 0.65 OVERSOLD): Extreme Call writing overcrowding! "
+            f"High probability of violent Call Short-Covering bounce (CE Gamma Blast) above VWAP."
+        )
+    elif prev_day_pcr < 0.85:
+        reasons.append(
+            f"Prev Day PCR ({prev_day_pcr:.2f} in 0.66–0.84): Bearish Call-writing overhead supply dominating."
+        )
+    else:
+        reasons.append(
+            f"Prev Day PCR ({prev_day_pcr:.2f} in 0.85–1.14): Neutral OI positioning — intraday 15m dOI will decide trend."
+        )
+
+    # 3. GIFT / SGX Nifty + Global Sentiment + FII Flow Synthesis
+    glob_bull = global_sentiment in ("STRONG_BULLISH", "MILD_BULLISH")
+    glob_bear = global_sentiment in ("STRONG_BEARISH", "MILD_BEARISH")
+    fii_bull = fii_flow == "FII_NET_LONG"
+    fii_bear = fii_flow == "FII_NET_SHORT"
+
+    reasons.append(
+        f"GIFT/SGX Nifty ({eff_gap:+.0f} pts) + Global ({global_sentiment}) + FII Flow ({fii_flow}) + Context ({event_context})."
+    )
+
+    # 4. Determine Expected Market Open & System Pre-Market Action Signal
+    suggested_bias = "TWO_WAY"
+    if india_vix > 19.5 or event_context == "PRE_EVENT_HIGH_IV":
+        expected_open_type = f"VOLATILE / HIGH-IV WHIPSAW ({eff_gap:+.0f} pts)"
+        system_signal = "🔴 NO_TRADE / AVOID OPTION BUYING (High IV > 19.5 / Event Crush Risk)"
+        suggested_bias = "NO_TRADE_CHOP"
+    elif pcr_reversal_bear and eff_gap >= -flat_thresh:
+        expected_open_type = f"GAP-UP / FLAT OPEN INTO PROFIT-BOOKING REVERSAL (Prev PCR {prev_day_pcr:.2f} Overbought)"
+        system_signal = (
+            f"🔄 BEARISH REVERSAL WATCH (Prev PCR {prev_day_pcr:.2f} High -> Do NOT chase Gap-Up CE; "
+            f"Buy ATM PE if Spot breaks below Opening 15m Low / VWAP)"
+        )
+        suggested_bias = "BEARISH_BELOW_TRIGGER"
+    elif pcr_reversal_bull and eff_gap <= flat_thresh:
+        expected_open_type = f"GAP-DOWN / FLAT OPEN INTO SHORT-COVERING BOUNCE (Prev PCR {prev_day_pcr:.2f} Oversold)"
+        system_signal = (
+            f"⚡ BULLISH BOUNCE WATCH (Prev PCR {prev_day_pcr:.2f} Oversold -> Do NOT chase Gap-Down PE; "
+            f"Buy ATM CE when Call Writers panic above VWAP)"
+        )
+        suggested_bias = "BULLISH_ABOVE_TRIGGER"
+    elif abs(eff_gap) > huge_thresh:
+        direction = "GAP-UP" if eff_gap > 0 else "GAP-DOWN"
+        expected_open_type = f"HUGE {direction} ({eff_gap:+.0f} pts) -> Post-Open Digest / Reversal Risk"
+        system_signal = (
+            f"⚠️ HUGE {direction} CAUTION (Wait 15–30 mins for IV to settle; trade only if VWAP + 6/6 align)"
+        )
+        suggested_bias = "TWO_WAY"
+    elif eff_gap > flat_thresh and (glob_bull or fii_bull) and not pcr_reversal_bear:
+        expected_open_type = f"GAP-UP BULLISH CONTINUATION ({eff_gap:+.0f} pts)"
+        system_signal = (
+            "🚀 BULLISH CONTINUATION SIGNAL (GIFT Gap-Up + Global/FII Bullish + Healthy PCR -> Buy ATM CE above Bull Trigger)"
+        )
+        suggested_bias = "BULLISH_ABOVE_TRIGGER"
+    elif eff_gap < -flat_thresh and (glob_bear or fii_bear) and not pcr_reversal_bull:
+        expected_open_type = f"GAP-DOWN BEARISH CONTINUATION ({eff_gap:+.0f} pts)"
+        system_signal = (
+            "🔻 BEARISH CONTINUATION SIGNAL (GIFT Gap-Down + Global/FII Bearish + Weak PCR -> Buy ATM PE below Bear Trigger)"
+        )
+        suggested_bias = "BEARISH_BELOW_TRIGGER"
+    elif (eff_gap > flat_thresh and glob_bear) or (eff_gap < -flat_thresh and glob_bull) or india_vix < 11.2:
+        expected_open_type = "SIDEWAYS / RANGE-BOUND CHOP (Conflicting Global vs GIFT Cues / Low VIX)"
+        system_signal = (
+            "↔️ SIDEWAYS / CHOPPY SESSION EXPECTED (Global & GIFT conflict or Low VIX -> Sit out or trade strict PDH/PDL breakout only)"
+        )
+        suggested_bias = "NO_TRADE_CHOP" if india_vix < 11.2 else "TWO_WAY"
+    else:
+        expected_open_type = f"FLAT / COILED-SPRING OPEN ({eff_gap:+.0f} pts)"
+        system_signal = (
+            "🎯 COILED-SPRING BREAKOUT DAY (Flat Open + Ideal VIX -> Wait for 09:20 AM 15m dOI & Trade Bull/Bear Trigger Breakout)"
+        )
+        suggested_bias = "TWO_WAY"
+
+    return {
+        "expected_open_type": expected_open_type,
+        "option_buying_env": option_buying_env,
+        "system_premarket_signal": system_signal,
+        "system_premarket_reasons": " ;; ".join(reasons),
+        "suggested_bias": suggested_bias,
+    }
 
 
 def save_pre_market_plan(
@@ -1247,7 +1440,7 @@ def save_pre_market_plan(
     plan_input: Dict[str, Any],
     report: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Save or update a daily Pre-Market Plan and immediately evaluate it against actual market/trade data."""
+    """Save or update a daily Pre-Market Sentiment & Plan and immediately evaluate it against actual market/trade data."""
     cur = store.conn.cursor()
     session_date = str(
         plan_input.get("session_date")
@@ -1258,7 +1451,7 @@ def save_pre_market_plan(
         or (report["underlying"] if report else "NIFTY")
     ).upper()
 
-    # Fetch existing plan if present so partial updates (like post_market_notes) preserve pre-plan fields
+    # Fetch existing plan if present so partial updates preserve fields
     cur.execute(
         "SELECT * FROM daily_pre_market_plans WHERE session_date = ? AND underlying = ? LIMIT 1",
         (session_date, underlying),
@@ -1269,7 +1462,24 @@ def save_pre_market_plan(
     pdl = float(plan_input.get("pdl", existing.get("pdl", 0.0)) or 0.0)
     pdc = float(plan_input.get("pdc", existing.get("pdc", 0.0)) or 0.0)
     pre_open_spot = float(plan_input.get("pre_open_spot", existing.get("pre_open_spot", 0.0)) or 0.0)
-    india_vix = float(plan_input.get("india_vix", existing.get("india_vix", 13.5)) or 13.5)
+    gift_nifty_gap = float(plan_input.get("gift_nifty_gap", existing.get("gift_nifty_gap", 0.0)) or 0.0)
+    if abs(gift_nifty_gap) < 0.01 and pre_open_spot > 0 and pdc > 0:
+        gift_nifty_gap = round(pre_open_spot - pdc, 2)
+    elif pre_open_spot <= 0 and pdc > 0 and abs(gift_nifty_gap) > 0:
+        pre_open_spot = round(pdc + gift_nifty_gap, 2)
+
+    global_sentiment = str(
+        plan_input.get("global_sentiment", existing.get("global_sentiment", "NEUTRAL_MIXED")) or "NEUTRAL_MIXED"
+    ).upper()
+    prev_day_pcr = float(plan_input.get("prev_day_pcr", existing.get("prev_day_pcr", 1.0)) or 1.0)
+    india_vix = float(plan_input.get("india_vix", existing.get("india_vix", 14.5)) or 14.5)
+    fii_flow = str(
+        plan_input.get("fii_flow", existing.get("fii_flow", "NEUTRAL_MIXED")) or "NEUTRAL_MIXED"
+    ).upper()
+    event_context = str(
+        plan_input.get("event_context", existing.get("event_context", "NORMAL_DAY")) or "NORMAL_DAY"
+    ).upper()
+
     call_wall = float(plan_input.get("call_wall_strike", existing.get("call_wall_strike", 0.0)) or 0.0)
     put_wall = float(plan_input.get("put_wall_strike", existing.get("put_wall_strike", 0.0)) or 0.0)
     planned_bias = str(plan_input.get("planned_bias", existing.get("planned_bias", "TWO_WAY")) or "TWO_WAY").upper()
@@ -1279,25 +1489,52 @@ def save_pre_market_plan(
     pre_plan_notes = str(plan_input.get("pre_plan_notes", existing.get("pre_plan_notes", ""))).strip()
     post_market_notes = str(plan_input.get("post_market_notes", existing.get("post_market_notes", ""))).strip()
 
-    gap_pts, gap_regime, vix_regime = classify_gap_and_vix(underlying, pre_open_spot, pdc, india_vix)
+    gap_pts, gap_regime, vix_regime = classify_gap_and_vix(
+        underlying, pre_open_spot, pdc, india_vix, gift_nifty_gap
+    )
+    sentiment_eval = evaluate_premarket_sentiment_signal(
+        underlying=underlying,
+        gift_nifty_gap=gift_nifty_gap,
+        global_sentiment=global_sentiment,
+        prev_day_pcr=prev_day_pcr,
+        india_vix=india_vix,
+        fii_flow=fii_flow,
+        event_context=event_context,
+        gap_pts=gap_pts,
+    )
+    if plan_input.get("use_suggested_bias"):
+        planned_bias = sentiment_eval["suggested_bias"]
+
     now_ts = int(time.time())
 
     cur.execute(
         """
         INSERT INTO daily_pre_market_plans (
-            session_date, underlying, pdh, pdl, pdc, pre_open_spot, gap_pts, gap_regime,
-            india_vix, vix_regime, call_wall_strike, put_wall_strike, planned_bias,
+            session_date, underlying, pdh, pdl, pdc, pre_open_spot,
+            gift_nifty_gap, global_sentiment, prev_day_pcr, fii_flow, event_context,
+            gap_pts, gap_regime, india_vix, vix_regime,
+            expected_open_type, option_buying_env, system_premarket_signal, system_premarket_reasons,
+            call_wall_strike, put_wall_strike, planned_bias,
             bull_trigger, bear_trigger, max_trades, pre_plan_notes, post_market_notes, updated_ts
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(session_date, underlying) DO UPDATE SET
             pdh = excluded.pdh,
             pdl = excluded.pdl,
             pdc = excluded.pdc,
             pre_open_spot = excluded.pre_open_spot,
+            gift_nifty_gap = excluded.gift_nifty_gap,
+            global_sentiment = excluded.global_sentiment,
+            prev_day_pcr = excluded.prev_day_pcr,
+            fii_flow = excluded.fii_flow,
+            event_context = excluded.event_context,
             gap_pts = excluded.gap_pts,
             gap_regime = excluded.gap_regime,
             india_vix = excluded.india_vix,
             vix_regime = excluded.vix_regime,
+            expected_open_type = excluded.expected_open_type,
+            option_buying_env = excluded.option_buying_env,
+            system_premarket_signal = excluded.system_premarket_signal,
+            system_premarket_reasons = excluded.system_premarket_reasons,
             call_wall_strike = excluded.call_wall_strike,
             put_wall_strike = excluded.put_wall_strike,
             planned_bias = excluded.planned_bias,
@@ -1315,10 +1552,19 @@ def save_pre_market_plan(
             pdl,
             pdc,
             pre_open_spot,
+            gift_nifty_gap,
+            global_sentiment,
+            prev_day_pcr,
+            fii_flow,
+            event_context,
             gap_pts,
             gap_regime,
             india_vix,
             vix_regime,
+            sentiment_eval["expected_open_type"],
+            sentiment_eval["option_buying_env"],
+            sentiment_eval["system_premarket_signal"],
+            sentiment_eval["system_premarket_reasons"],
             call_wall,
             put_wall,
             planned_bias,
@@ -1341,19 +1587,17 @@ def evaluate_pre_market_vs_actual(
     report: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
-    Compare today's Pre-Market Plan against actual intraday Spot action, 6/6 Signals, and Executed Trades
-    to highlight where your Pre-Plan matched vs. where your trades deviated.
+    Compare today's Pre-Market Sentiment Forecast & Plan against actual intraday Spot action,
+    6/6 Signals, and Executed Trades to highlight where your Pre-Plan matched vs. deviated.
     """
     cur = store.conn.cursor()
 
-    # Check if a pre-market plan exists for today; if not and report exists, seed a smart default baseline
     cur.execute(
         "SELECT * FROM daily_pre_market_plans WHERE session_date = ? AND underlying = ? LIMIT 1",
         (session_date, underlying),
     )
     row = cur.fetchone()
     if not row and report:
-        # Find today's earliest spot_ltp to seed realistic pre-plan levels
         cur.execute(
             """
             SELECT spot_ltp FROM chain_snapshots
@@ -1365,43 +1609,36 @@ def evaluate_pre_market_vs_actual(
         first_snap = cur.fetchone()
         open_spot = float(first_snap["spot_ltp"]) if first_snap else float(report["spot_ltp"])
         step = 100.0 if underlying == "BANKNIFTY" else 50.0
-        default_pdc = round(open_spot - 15.0, 1)
-        default_pdh = round(open_spot + 20.0, 1)
-        default_pdl = round(open_spot - 45.0, 1)
+        default_pdc = round(open_spot - 22.0, 1)
+        default_pdh = round(open_spot + 25.0, 1)
+        default_pdl = round(open_spot - 65.0, 1)
         default_bull = round(open_spot + 12.0, 1)
-        default_bear = round(open_spot - 18.0, 1)
-        gap_pts, gap_regime, vix_regime = classify_gap_and_vix(underlying, open_spot, default_pdc, 13.4)
-        cur.execute(
-            """
-            INSERT OR IGNORE INTO daily_pre_market_plans (
-                session_date, underlying, pdh, pdl, pdc, pre_open_spot, gap_pts, gap_regime,
-                india_vix, vix_regime, call_wall_strike, put_wall_strike, planned_bias,
-                bull_trigger, bear_trigger, max_trades, pre_plan_notes, post_market_notes, updated_ts
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                session_date,
-                underlying,
-                default_pdh,
-                default_pdl,
-                default_pdc,
-                open_spot,
-                gap_pts,
-                gap_regime,
-                13.4,
-                vix_regime,
-                float(report.get("resistance_strike") or (round(open_spot / step) * step + step)),
-                float(report.get("support_strike") or (round(open_spot / step) * step)),
-                "BULLISH_ABOVE_TRIGGER",
-                default_bull,
-                default_bear,
-                3,
-                f"Buy ATM CE only if Spot holds above {default_bull:.0f} with 24500 CE Short Covering; Buy PE only below {default_bear:.0f}.",
-                "",
-                int(time.time()),
-            ),
+        default_bear = round(open_spot - 20.0, 1)
+        save_pre_market_plan(
+            store=store,
+            plan_input={
+                "session_date": session_date,
+                "underlying": underlying,
+                "pdh": default_pdh,
+                "pdl": default_pdl,
+                "pdc": default_pdc,
+                "pre_open_spot": open_spot,
+                "gift_nifty_gap": 22.0,
+                "global_sentiment": "MILD_BULLISH",
+                "prev_day_pcr": 1.18,
+                "india_vix": 14.4,
+                "fii_flow": "FII_NET_LONG",
+                "event_context": "NORMAL_DAY",
+                "call_wall_strike": float(report.get("resistance_strike") or (round(open_spot / step) * step + step)),
+                "put_wall_strike": float(report.get("support_strike") or (round(open_spot / step) * step)),
+                "planned_bias": "BULLISH_ABOVE_TRIGGER",
+                "bull_trigger": default_bull,
+                "bear_trigger": default_bear,
+                "max_trades": 2,
+                "pre_plan_notes": f"VIX 14.4 (Goldilocks 14-16 zone) + Prev PCR 1.18 Bullish -> Buy ATM CE above {default_bull:.0f}.",
+            },
+            report=None,
         )
-        store.conn.commit()
         cur.execute(
             "SELECT * FROM daily_pre_market_plans WHERE session_date = ? AND underlying = ? LIMIT 1",
             (session_date, underlying),
@@ -1409,9 +1646,23 @@ def evaluate_pre_market_vs_actual(
         row = cur.fetchone()
 
     if not row:
-        return {"current": None, "history": []}
+        return {"current": None, "today": None, "history": []}
 
     plan = dict(row)
+
+    # Re-compute sentiment signal if missing on older rows
+    if not plan.get("system_premarket_signal"):
+        s_eval = evaluate_premarket_sentiment_signal(
+            underlying=underlying,
+            gift_nifty_gap=float(plan.get("gift_nifty_gap") or plan.get("gap_pts") or 0.0),
+            global_sentiment=str(plan.get("global_sentiment") or "NEUTRAL_MIXED"),
+            prev_day_pcr=float(plan.get("prev_day_pcr") or 1.0),
+            india_vix=float(plan.get("india_vix") or 14.5),
+            fii_flow=str(plan.get("fii_flow") or "NEUTRAL_MIXED"),
+            event_context=str(plan.get("event_context") or "NORMAL_DAY"),
+            gap_pts=float(plan.get("gap_pts") or 0.0),
+        )
+        plan.update(s_eval)
 
     # 1. Actual Intraday Spot High / Low / Open / Close from chain_snapshots
     cur.execute(
@@ -1468,32 +1719,39 @@ def evaluate_pre_market_vs_actual(
     ce_6_signals = sig_counts.get("CE", 0)
     pe_6_signals = sig_counts.get("PE", 0)
 
-    # 4. Evaluate Market vs. Pre-Planned Triggers
+    # 4. Evaluate Market Action vs. Pre-Market Sentiment & Triggers
     bull_trig = float(plan.get("bull_trigger") or 0.0)
     bear_trig = float(plan.get("bear_trigger") or 0.0)
     pdh = float(plan.get("pdh") or 0.0)
     pdl = float(plan.get("pdl") or 0.0)
+    prev_pcr = float(plan.get("prev_day_pcr") or 1.0)
 
     bull_crossed = bull_trig > 0 and actual_high >= bull_trig
     bear_crossed = bear_trig > 0 and actual_low <= bear_trig
     pdh_broken = pdh > 0 and actual_high >= pdh
     pdl_broken = pdl > 0 and actual_low <= pdl
+    intraday_chg = round(actual_close - actual_open, 1)
 
     mkt_parts: List[str] = []
+    if prev_pcr >= 1.45 and intraday_chg < 0:
+        mkt_parts.append(f"🎯 High Prev PCR ({prev_pcr:.2f}) Reversal Played Out (Spot fell {intraday_chg:+.1f} pts from Open)")
+    elif prev_pcr <= 0.65 and intraday_chg > 0:
+        mkt_parts.append(f"🎯 Oversold Prev PCR ({prev_pcr:.2f}) Bounce Played Out (Spot rallied {intraday_chg:+.1f} pts from Open)")
+
     if bull_crossed:
-        mkt_parts.append(f"✅ Bull Trigger ({bull_trig:.0f}) CROSSED (High reached {actual_high:.1f})")
+        mkt_parts.append(f"✅ Bull Trigger ({bull_trig:.0f}) CROSSED (High {actual_high:.1f})")
     elif bull_trig > 0:
         mkt_parts.append(f"⏳ Bull Trigger ({bull_trig:.0f}) NOT crossed (High {actual_high:.1f})")
 
     if bear_crossed:
-        mkt_parts.append(f"🔻 Bear Trigger ({bear_trig:.0f}) CROSSED (Low reached {actual_low:.1f})")
+        mkt_parts.append(f"🔻 Bear Trigger ({bear_trig:.0f}) CROSSED (Low {actual_low:.1f})")
     elif bear_trig > 0:
         mkt_parts.append(f"🛡️ Bear Trigger ({bear_trig:.0f}) held (Low {actual_low:.1f})")
 
     if pdh_broken:
-        mkt_parts.append(f"Broke above PDH ({pdh:.0f})")
+        mkt_parts.append(f"Broke PDH ({pdh:.0f})")
     if pdl_broken:
-        mkt_parts.append(f"Broke below PDL ({pdl:.0f})")
+        mkt_parts.append(f"Broke PDL ({pdl:.0f})")
 
     market_vs_plan_detail = " | ".join(mkt_parts) if mkt_parts else f"Range: {actual_low:.1f} - {actual_high:.1f}"
 
@@ -1518,7 +1776,7 @@ def evaluate_pre_market_vs_actual(
         deviations.append(f"❌ BIAS DEVIATION: Planned {bias}, but took {ce_trades} CE trade(s)")
     if "NO_TRADE" in bias and trades_count > 0:
         score -= 35
-        deviations.append(f"❌ CHOP DEVIATION: Planned NO_TRADE_CHOP, but took {trades_count} trade(s)")
+        deviations.append(f"❌ NO-TRADE DEVIATION: Planned NO_TRADE_CHOP, but took {trades_count} trade(s)")
 
     if ce_trades > 0 and bull_trig > 0 and not bull_crossed:
         score -= 20
@@ -1546,7 +1804,7 @@ def evaluate_pre_market_vs_actual(
         plan_match_status = f"DEVIATED ({score}% Discipline)" if score < 85 else f"PARTIAL MATCH ({score}%)"
         trade_vs_plan_detail = " | ".join(deviations + matches)
     else:
-        plan_match_status = f"PLAN FOLLOWED ({score}% Discipline)"
+        plan_match_status = f"PLAN ALIGNED ({score}% Discipline)"
         trade_vs_plan_detail = " | ".join(matches) if matches else "No rule deviations."
 
     cur.execute(
@@ -1582,9 +1840,21 @@ def evaluate_pre_market_vs_actual(
 
     def _enrich_plan_dict(d: Dict[str, Any]) -> Dict[str, Any]:
         pdc_val = float(d.get("pdc") or 0.0)
-        gap_pts_val = float(d.get("gap_points") or 0.0)
+        gap_pts_val = float(d.get("gap_pts") or 0.0)
         d["gap_type"] = d.get("gap_regime") or "UNCLASSIFIED"
         d["gap_pct"] = round((gap_pts_val / pdc_val) * 100.0, 2) if pdc_val > 0 else 0.0
+        if not d.get("system_premarket_signal"):
+            s_ev = evaluate_premarket_sentiment_signal(
+                underlying=str(d.get("underlying") or underlying),
+                gift_nifty_gap=float(d.get("gift_nifty_gap") or gap_pts_val),
+                global_sentiment=str(d.get("global_sentiment") or "NEUTRAL_MIXED"),
+                prev_day_pcr=float(d.get("prev_day_pcr") or 1.0),
+                india_vix=float(d.get("india_vix") or 14.5),
+                fii_flow=str(d.get("fii_flow") or "NEUTRAL_MIXED"),
+                event_context=str(d.get("event_context") or "NORMAL_DAY"),
+                gap_pts=gap_pts_val,
+            )
+            d.update(s_ev)
         return d
 
     updated_current = _enrich_plan_dict(updated_current)
@@ -1616,14 +1886,14 @@ def _write_journal_files(
         f"# LearnOT Daily Trading & Fine-Tuning Journal ({session_date} — {underlying})",
         "",
         "> **How to Use This Journal:**",
-        "> 1. **🌅 Section 0 (Pre-Market Plan vs. Post-Market Deviation):** Compares your morning pre-plan (PDH/PDL, Gap, Bull/Bear Triggers, Bias) against actual market action and your executed trades.",
+        "> 1. **🌅 Section 0 (Pre-Market Sentiment Signal vs. Post-Market Deviation):** Synthesizes GIFT/SGX Nifty, Global Sentiment, Prev Day PCR (Reversal vs Trend), and India VIX (`13.5–16.5` Goldilocks vs High-IV No-Trade) into a Pre-Market Signal and audits how your trades matched or deviated.",
         "> 2. **✅ What Was Good Today (`Score >= 3/6`):** Which conditions aligned in your favor (with exact numbers).",
         "> 3. **❌ Why It Did Not Meet 6/6:** Which specific rule(s) failed (e.g., PCR, 15m dOI, Volume Burst, or Option VWAP) with exact live numbers.",
         "> 4. **📈 What Happened Next (Outcome Tracking):** How high the option premium moved *after* that snapshot (`Max LTP After` & `Max Gain %`) so you can decide whether to fine-tune a strict condition or keep it.",
         "",
         "---",
         "",
-        "## 0. Pre-Market Plan vs. Post-Market Deviation Review",
+        "## 0. Pre-Market Sentiment Signal vs. Post-Market Deviation Review",
         "",
     ]
 
@@ -1633,14 +1903,18 @@ def _write_journal_files(
         safe_trd_detail = str(cur_plan.get("trade_vs_plan_detail") or "--").replace(" | ", " ;; ")
         safe_pre_note = str(cur_plan.get("pre_plan_notes") or "None").replace("|", "/")
         safe_post_note = str(cur_plan.get("post_market_notes") or "Add reflection in Web UI Portal").replace("|", "/")
+        safe_sys_sig = str(cur_plan.get("system_premarket_signal") or "--").replace("|", "/")
+        safe_opt_env = str(cur_plan.get("option_buying_env") or "--").replace("|", "/")
+        safe_exp_open = str(cur_plan.get("expected_open_type") or "--").replace("|", "/")
         md_lines.extend(
             [
-                f"| Metric | Morning Pre-Plan (`09:08 AM`) | Actual Intraday Outcome (`09:15 AM – 03:30 PM`) | Match / Deviation Verdict |",
+                f"| Metric | Morning Pre-Market Sentiment (`09:00 AM`) | Actual Intraday Outcome (`09:15 AM – 03:30 PM`) | System Signal & Deviation Verdict |",
                 f"| :--- | :--- | :--- | :--- |",
-                f"| **Opening & Range** | Pre-Open: `{cur_plan['pre_open_spot']:.1f}` (PDC `{cur_plan['pdc']:.1f}`, PDH `{cur_plan['pdh']:.1f}`, PDL `{cur_plan['pdl']:.1f}`) | Open `{cur_plan['actual_open']:.1f}` / High `{cur_plan['actual_high']:.1f}` / Low `{cur_plan['actual_low']:.1f}` / Last `{cur_plan['actual_close']:.1f}` | `{cur_plan['gap_regime']}` |",
-                f"| **Volatility & OI Walls** | `{cur_plan['vix_regime']}` / Walls: `{cur_plan['put_wall_strike']:.0f} PE` – `{cur_plan['call_wall_strike']:.0f} CE` | Spot moved `{cur_plan['actual_high'] - cur_plan['actual_low']:.1f}` pts intraday | `{safe_mkt_detail}` |",
-                f"| **Bias & Trigger Levels** | Bias: **`{cur_plan['planned_bias']}`** (Bull `>{cur_plan['bull_trigger']:.0f}` / Bear `<{cur_plan['bear_trigger']:.0f}`) | Trades Taken: **`{cur_plan['actual_trades_count']}/{cur_plan['max_trades']}`** (PnL: `₹{cur_plan['actual_pnl_rupees']:+.2f}`) | **`{cur_plan['plan_match_status']}`** |",
-                f"| **Execution vs. Plan** | *Morning Note:* {safe_pre_note} | *Post-Market Note:* {safe_post_note} | {safe_trd_detail} |",
+                f"| **GIFT Nifty & Global Cues** | GIFT Gap: `{cur_plan.get('gift_nifty_gap', 0.0):+.1f}` pts / Global: `{cur_plan.get('global_sentiment', 'NEUTRAL')}` / FII: `{cur_plan.get('fii_flow', 'NEUTRAL')}` | Open `{cur_plan['actual_open']:.1f}` / High `{cur_plan['actual_high']:.1f}` / Low `{cur_plan['actual_low']:.1f}` / Close `{cur_plan['actual_close']:.1f}` | **`{safe_exp_open}`** |",
+                f"| **Prev Day PCR & VIX Regime** | Prev Day PCR: **`{cur_plan.get('prev_day_pcr', 1.0):.2f}`** / India VIX: **`{cur_plan['india_vix']:.1f}`** (`{cur_plan.get('event_context', 'NORMAL_DAY')}`) | Intraday Range: `{cur_plan['actual_high'] - cur_plan['actual_low']:.1f}` pts (Walls: `{cur_plan['put_wall_strike']:.0f} PE` – `{cur_plan['call_wall_strike']:.0f} CE`) | `{safe_opt_env}` |",
+                f"| **System Pre-Market Signal** | **`{safe_sys_sig}`** | `{safe_mkt_detail}` | PDH `{cur_plan['pdh']:.0f}` / PDL `{cur_plan['pdl']:.0f}` / PDC `{cur_plan['pdc']:.0f}` |",
+                f"| **Planned Bias & Triggers** | Bias: **`{cur_plan['planned_bias']}`** (Bull `>{cur_plan['bull_trigger']:.0f}` / Bear `<{cur_plan['bear_trigger']:.0f}`) | Trades Taken: **`{cur_plan['actual_trades_count']}/{cur_plan['max_trades']}`** (PnL: `₹{cur_plan['actual_pnl_rupees']:+.2f}`) | **`{cur_plan['plan_match_status']}`** |",
+                f"| **Execution vs. Pre-Plan** | *Morning Note:* {safe_pre_note} | *Post-Market Note:* {safe_post_note} | {safe_trd_detail} |",
                 "",
             ]
         )
@@ -2489,7 +2763,7 @@ def main() -> int:
         print("\n[*] Running 3-Step Trapped-Seller Gamma Blast Simulation (3-Min NSE OI Cycle)...")
         demo_steps = generate_demo_snapshots(args.underlying)
         demo_date = dt.datetime.fromtimestamp(demo_steps[0][0]).strftime("%Y-%m-%d")
-        # Seed a realistic morning Pre-Market Plan before running snapshots
+        # Seed a realistic morning Pre-Market Sentiment & Plan before running snapshots
         save_pre_market_plan(
             store=store,
             plan_input={
@@ -2499,14 +2773,19 @@ def main() -> int:
                 "pdl": 24390.0,
                 "pdc": 24470.0,
                 "pre_open_spot": 24492.0,
-                "india_vix": 13.8,
+                "gift_nifty_gap": 22.0,
+                "global_sentiment": "MILD_BULLISH",
+                "prev_day_pcr": 1.18,
+                "india_vix": 14.5,
+                "fii_flow": "FII_NET_LONG",
+                "event_context": "NORMAL_DAY",
                 "call_wall_strike": 24500.0,
                 "put_wall_strike": 24400.0,
                 "planned_bias": "BULLISH_ABOVE_TRIGGER",
                 "bull_trigger": 24510.0,
                 "bear_trigger": 24440.0,
                 "max_trades": 2,
-                "pre_plan_notes": "Buy ATM 24500 CE only if Spot crosses 24510 and 24500 Call Writers start covering (3m dOI < 0).",
+                "pre_plan_notes": "GIFT Nifty +22, VIX 14.5 (Goldilocks 14-16 zone), Prev PCR 1.18 Bullish -> Buy ATM 24500 CE above 24510 when Call Writers cover.",
                 "post_market_notes": "Waited patiently through 09:21 AM 5/6 setup; entered on 09:24 AM 6/6 breakout above 24510.",
             },
         )
