@@ -21,6 +21,7 @@ import datetime as dt
 import json
 import os
 import sys
+import threading
 import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -50,6 +51,7 @@ class AnalyzerAppState:
     """Manages live OpenAlgo polling (3-min NSE OI cycle), WhatsApp alerts, demo progression, and paper trades."""
 
     def __init__(self) -> None:
+        self.lock = threading.RLock()
         self.host: str = os.getenv("OPENALGO_HOST", "http://127.0.0.1:5000")
         self.api_key: str = os.getenv("OPENALGO_API_KEY", "")
         if self.api_key == "your_openalgo_api_key_here":
@@ -71,6 +73,8 @@ class AnalyzerAppState:
         self.analyze_mode: Optional[bool] = None
         self.eval_cycle_count: int = 0
         self.last_eval_wall_time: str = ""
+        self.last_eval_epoch: float = 0.0
+        self.auto_poll_interval_sec: int = 180
 
         self._reset_demo(self.underlying)
 
@@ -242,27 +246,98 @@ class AnalyzerAppState:
 
     def step_or_poll(self, advance_demo: bool = False) -> Dict[str, Any]:
         """Fetch latest snapshot from OpenAlgo or advance demo scenario."""
-        self.last_error = None
-        self.eval_cycle_count += 1
-        self.last_eval_wall_time = dt.datetime.now().strftime("%H:%M:%S")
-        if self.mode == "DEMO":
-            if self.last_report is None:
-                ts, c_resp, s_resp = self.demo_scenarios[0]
-                self.demo_step_idx = 0
-                self.last_report = analyze_option_chain(
-                    store=self.demo_store,
-                    underlying=self.underlying,
-                    expiry_date=c_resp["expiry_date"],
-                    days_to_expiry=4,
-                    chain_resp=json.loads(json.dumps(c_resp)),
-                    synth_resp=json.loads(json.dumps(s_resp)),
-                    now_ts=ts,
-                    source_mode=f"DEMO_SIMULATOR (Step 1/{len(self.demo_scenarios)})",
+        with self.lock:
+            self.last_error = None
+            self.eval_cycle_count += 1
+            self.last_eval_wall_time = dt.datetime.now().strftime("%H:%M:%S")
+            self.last_eval_epoch = time.time()
+
+            if self.mode == "DEMO":
+                if self.last_report is None:
+                    ts, c_resp, s_resp = self.demo_scenarios[0]
+                    self.demo_step_idx = 0
+                    self.last_report = analyze_option_chain(
+                        store=self.demo_store,
+                        underlying=self.underlying,
+                        expiry_date=c_resp["expiry_date"],
+                        days_to_expiry=4,
+                        chain_resp=json.loads(json.dumps(c_resp)),
+                        synth_resp=json.loads(json.dumps(s_resp)),
+                        now_ts=ts,
+                        source_mode=f"DEMO_SIMULATOR (Step 1/{len(self.demo_scenarios)})",
+                    )
+                elif advance_demo:
+                    self.demo_step_idx = (self.demo_step_idx + 1) % len(self.demo_scenarios)
+                    if self.demo_step_idx == 0:
+                        self._reset_demo(self.underlying)
+                    ts, c_resp, s_resp = self.demo_scenarios[self.demo_step_idx]
+                    self.last_report = analyze_option_chain(
+                        store=self.demo_store,
+                        underlying=self.underlying,
+                        expiry_date=c_resp["expiry_date"],
+                        days_to_expiry=4,
+                        chain_resp=json.loads(json.dumps(c_resp)),
+                        synth_resp=json.loads(json.dumps(s_resp)),
+                        now_ts=ts,
+                        source_mode=f"DEMO_SIMULATOR (Step {self.demo_step_idx + 1}/{len(self.demo_scenarios)})",
+                    )
+                else:
+                    self.last_report["eval_log"] = log_evaluation_trace_offline(
+                        self.last_report,
+                        source_mode=f"DEMO_SIMULATOR_RE_EVAL (Step {self.demo_step_idx + 1}/{len(self.demo_scenarios)})",
+                    )
+                self._update_open_paper_trades(self.demo_store, self.last_report)
+                self._check_auto_whatsapp(self.demo_store, self.last_report)
+                return self._serialize_state(self.demo_store)
+
+            # LIVE_OPENALGO mode
+            is_open, mkt_reason = check_indian_market_hours()
+            if not is_open and self.last_report is not None and not advance_demo:
+                self.last_error = f"{mkt_reason} — Live auto-polling paused so frozen closing quotes don't dilute your journal."
+                return self._serialize_state(self.live_store)
+
+            try:
+                gateway = OpenAlgoGateway(host=self.host, api_key=self.api_key)
+                status_resp = gateway.analyzer_status()
+                self.analyze_mode = bool((status_resp.get("data") or {}).get("analyze_mode", False))
+
+                nfo_exch = "BFO" if self.underlying == "SENSEX" else "NFO"
+                expiry_date, days_to_expiry = gateway.find_nearest_expiry(
+                    self.underlying, exchange=nfo_exch
                 )
-            elif advance_demo:
-                self.demo_step_idx = (self.demo_step_idx + 1) % len(self.demo_scenarios)
-                if self.demo_step_idx == 0:
-                    self._reset_demo(self.underlying)
+                chain_resp = gateway.fetch_option_chain(
+                    underlying=self.underlying,
+                    expiry_date=expiry_date,
+                    exchange=self.exchange,
+                    strike_count=self.strike_count,
+                    with_greeks=True,
+                )
+                synth_resp = gateway.fetch_synthetic_future(
+                    underlying=self.underlying,
+                    expiry_date=expiry_date,
+                    exchange=self.exchange,
+                )
+                self.last_report = analyze_option_chain(
+                    store=self.live_store,
+                    underlying=self.underlying,
+                    expiry_date=expiry_date,
+                    days_to_expiry=days_to_expiry,
+                    chain_resp=chain_resp,
+                    synth_resp=synth_resp,
+                    source_mode=f"LIVE_OPENALGO ({self.host})",
+                )
+                self._update_open_paper_trades(self.live_store, self.last_report)
+                self._check_auto_whatsapp(self.live_store, self.last_report)
+                if not is_open:
+                    self.last_error = f"{mkt_reason} — Loaded closing snapshot once; 3m auto-polling paused until 09:15 AM."
+            except Exception as exc:
+                self.last_error = str(exc)
+                if self.last_report is None:
+                    self.demo_step_idx = 0
+                elif advance_demo:
+                    self.demo_step_idx = (self.demo_step_idx + 1) % len(self.demo_scenarios)
+                    if self.demo_step_idx == 0:
+                        self._reset_demo(self.underlying)
                 ts, c_resp, s_resp = self.demo_scenarios[self.demo_step_idx]
                 self.last_report = analyze_option_chain(
                     store=self.demo_store,
@@ -272,72 +347,10 @@ class AnalyzerAppState:
                     chain_resp=json.loads(json.dumps(c_resp)),
                     synth_resp=json.loads(json.dumps(s_resp)),
                     now_ts=ts,
-                    source_mode=f"DEMO_SIMULATOR (Step {self.demo_step_idx + 1}/{len(self.demo_scenarios)})",
+                    source_mode=f"FALLBACK_DEMO_SIMULATOR (Step {self.demo_step_idx + 1}/{len(self.demo_scenarios)} — OpenAlgo Offline)",
                 )
-            else:
-                self.last_report["eval_log"] = log_evaluation_trace_offline(
-                    self.last_report,
-                    source_mode=f"DEMO_SIMULATOR_RE_EVAL (Step {self.demo_step_idx + 1}/{len(self.demo_scenarios)})",
-                )
-            self._update_open_paper_trades(self.demo_store, self.last_report)
-            self._check_auto_whatsapp(self.demo_store, self.last_report)
-            return self._serialize_state(self.demo_store)
-
-        # LIVE_OPENALGO mode
-        is_open, mkt_reason = check_indian_market_hours()
-        if not is_open and self.last_report is not None:
-            self.last_error = f"{mkt_reason} — Live auto-polling paused so frozen closing quotes don't dilute your journal."
-            return self._serialize_state(self.live_store)
-
-        try:
-            gateway = OpenAlgoGateway(host=self.host, api_key=self.api_key)
-            status_resp = gateway.analyzer_status()
-            self.analyze_mode = bool((status_resp.get("data") or {}).get("analyze_mode", False))
-
-            nfo_exch = "BFO" if self.underlying == "SENSEX" else "NFO"
-            expiry_date, days_to_expiry = gateway.find_nearest_expiry(
-                self.underlying, exchange=nfo_exch
-            )
-            chain_resp = gateway.fetch_option_chain(
-                underlying=self.underlying,
-                expiry_date=expiry_date,
-                exchange=self.exchange,
-                strike_count=self.strike_count,
-                with_greeks=True,
-            )
-            synth_resp = gateway.fetch_synthetic_future(
-                underlying=self.underlying,
-                expiry_date=expiry_date,
-                exchange=self.exchange,
-            )
-            self.last_report = analyze_option_chain(
-                store=self.live_store,
-                underlying=self.underlying,
-                expiry_date=expiry_date,
-                days_to_expiry=days_to_expiry,
-                chain_resp=chain_resp,
-                synth_resp=synth_resp,
-                source_mode=f"LIVE_OPENALGO ({self.host})",
-            )
-            self._update_open_paper_trades(self.live_store, self.last_report)
-            self._check_auto_whatsapp(self.live_store, self.last_report)
-            if not is_open:
-                self.last_error = f"{mkt_reason} — Loaded closing snapshot once; 3m auto-polling paused until 09:15 AM."
-        except Exception as exc:
-            self.last_error = str(exc)
-            if self.last_report is None:
-                ts, c_resp, s_resp = self.demo_scenarios[0]
-                self.last_report = analyze_option_chain(
-                    store=self.demo_store,
-                    underlying=self.underlying,
-                    expiry_date=c_resp["expiry_date"],
-                    days_to_expiry=4,
-                    chain_resp=json.loads(json.dumps(c_resp)),
-                    synth_resp=json.loads(json.dumps(s_resp)),
-                    now_ts=ts,
-                    source_mode="FALLBACK_DEMO_SIMULATOR",
-                )
-        return self._serialize_state(self.get_active_store())
+                self._update_open_paper_trades(self.demo_store, self.last_report)
+            return self._serialize_state(self.get_active_store())
 
     def _check_auto_whatsapp(
         self, store: SnapshotStore, report: Optional[Dict[str, Any]]
@@ -1826,20 +1839,24 @@ INDEX_HTML = r"""<!DOCTYPE html>
       renderState(data);
     }
 
-    function toggleAutoRefresh() {
+    function toggleAutoRefresh(syncBackend = true) {
       if (autoRefreshTimer) clearInterval(autoRefreshTimer);
       if (countdownTickTimer) clearInterval(countdownTickTimer);
       const sec = parseInt(document.getElementById("autoRefreshSelect").value, 10);
       countdownRemainingSec = sec;
       updateCountdownLabels();
+      if (syncBackend) {
+        apiCall("/api/config", "POST", { auto_poll_sec: sec, skip_eval: true }).catch(() => {});
+      }
       if (sec > 0) {
         countdownTickTimer = setInterval(() => {
           countdownRemainingSec = Math.max(0, countdownRemainingSec - 1);
           updateCountdownLabels();
           if (countdownRemainingSec === 0) {
             countdownRemainingSec = sec;
-            const isDemoStep = (sec === 15 && document.getElementById("modeSelect").value === "DEMO");
-            refreshData(isDemoStep);
+            // In LIVE mode, advance=1 is ignored when OpenAlgo is connected (it fetches live quotes),
+            // and in DEMO/Fallback mode, advance=1 steps to the next dynamic 3-minute snapshot!
+            refreshData(true);
           }
         }, 1000);
       }
@@ -2488,6 +2505,11 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             if "underlying" in data and data["underlying"] != APP_STATE.underlying:
                 APP_STATE.underlying = str(data["underlying"])
                 APP_STATE._reset_demo(APP_STATE.underlying)
+            if "auto_poll_sec" in data:
+                APP_STATE.auto_poll_interval_sec = max(0, int(data["auto_poll_sec"]))
+            if data.get("skip_eval"):
+                self._send_json({"status": "ok", "auto_poll_sec": APP_STATE.auto_poll_interval_sec})
+                return
             state = APP_STATE.step_or_poll(advance_demo=False)
             self._send_json(state)
             return
@@ -2550,17 +2572,44 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
         self._send_json({"error": "Not found"}, status=404)
 
 
+def _background_auto_poller() -> None:
+    """
+    Background daemon thread that guarantees automatic 3-minute Option Chain evaluation
+    and dynamic offline logging (to logs/evaluation_trace_<YYYY-MM-DD>.log, .csv, .jsonl)
+    even when no browser tab is open or the browser tab is minimized/throttled.
+    """
+    while True:
+        time.sleep(2.0)
+        try:
+            interval = APP_STATE.auto_poll_interval_sec
+            if interval <= 0:
+                continue
+            elapsed = time.time() - APP_STATE.last_eval_epoch
+            if elapsed >= interval:
+                APP_STATE.step_or_poll(advance_demo=True)
+        except Exception as exc:
+            print(f"  [AUTO-POLLER WARNING] {exc}")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="LearnOT Option Buying Web UI Desk")
     parser.add_argument("--host", default="127.0.0.1", help="Bind address (default: 127.0.0.1)")
     parser.add_argument("--port", type=int, default=8080, help="Port number (default: 8080)")
     args = parser.parse_args()
 
+    # Run Cycle #1 immediately on startup so offline logs are initialized right away
+    APP_STATE.step_or_poll(advance_demo=False)
+
+    # Start background 3-minute auto-poller daemon thread
+    poller_thread = threading.Thread(target=_background_auto_poller, name="LearnOT-3m-AutoPoller", daemon=True)
+    poller_thread.start()
+
     server = HTTPServer((args.host, args.port), DashboardRequestHandler)
     print(f"\n======================================================================")
     print(f" LearnOT Option Buying UI Desk is running at: http://{args.host}:{args.port}")
     print(f" Connected OpenAlgo Target                  : {APP_STATE.host}")
-    print(f" Default Polling Cycle                      : 180s (3-Min NSE OI Cycle)")
+    print(f" Auto-Polling & Offline Logger              : ACTIVE (Every {APP_STATE.auto_poll_interval_sec}s / 3m Cycle)")
+    print(f" Offline Log Directory                      : {BASE_DIR / 'logs'}")
     print(f"======================================================================\n")
     try:
         server.serve_forever()
