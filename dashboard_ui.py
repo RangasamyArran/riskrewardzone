@@ -68,6 +68,8 @@ class AnalyzerAppState:
         self.last_error: Optional[str] = None
         self.last_whatsapp_result: Optional[Dict[str, Any]] = None
         self.analyze_mode: Optional[bool] = None
+        self.eval_cycle_count: int = 0
+        self.last_eval_wall_time: str = ""
 
         self._reset_demo(self.underlying)
 
@@ -240,6 +242,8 @@ class AnalyzerAppState:
     def step_or_poll(self, advance_demo: bool = False) -> Dict[str, Any]:
         """Fetch latest snapshot from OpenAlgo or advance demo scenario."""
         self.last_error = None
+        self.eval_cycle_count += 1
+        self.last_eval_wall_time = dt.datetime.now().strftime("%H:%M:%S")
         if self.mode == "DEMO":
             if self.last_report is None:
                 ts, c_resp, s_resp = self.demo_scenarios[0]
@@ -514,6 +518,119 @@ class AnalyzerAppState:
             )
         return self._serialize_state(store)
 
+    def _build_evaluation_trace(self, report: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        """Build a transparent step-by-step evaluation log trace showing inputs considered, conditions met, and missing conditions."""
+        if not report:
+            return {
+                "cycle_id": self.eval_cycle_count,
+                "wall_time": self.last_eval_wall_time or dt.datetime.now().strftime("%H:%M:%S"),
+                "status": "WAITING_FOR_SNAPSHOT",
+            }
+
+        atm_strike = float(report.get("atm_strike") or 0.0)
+        atm_ce: Dict[str, Any] = {}
+        atm_pe: Dict[str, Any] = {}
+        for r in report.get("strikes", []):
+            if abs(float(r.get("strike") or 0.0) - atm_strike) < 0.01:
+                atm_ce = r.get("ce") or {}
+                atm_pe = r.get("pe") or {}
+                break
+
+        sig = report.get("signals") or {}
+        ce_checks = sig.get("ce_checks") or []
+        pe_checks = sig.get("pe_checks") or []
+
+        ce_passed = [{"rule": c[0], "detail": c[2]} for c in ce_checks if c[1]]
+        ce_missing = [{"rule": c[0], "detail": c[2]} for c in ce_checks if not c[1]]
+        pe_passed = [{"rule": c[0], "detail": c[2]} for c in pe_checks if c[1]]
+        pe_missing = [{"rule": c[0], "detail": c[2]} for c in pe_checks if not c[1]]
+
+        ce_score = int(sig.get("ce_score") or 0)
+        pe_score = int(sig.get("pe_score") or 0)
+        action = str(sig.get("action") or "WAIT")
+
+        source_desc = (
+            f"DEMO SIMULATOR (Snapshot {self.demo_step_idx + 1}/{len(self.demo_scenarios)})"
+            if self.mode == "DEMO"
+            else f"LIVE OPENALGO ({self.host})"
+        )
+
+        spot_ltp = float(report.get("spot_ltp") or 0.0)
+        spot_vwap = float(report.get("spot_vwap") or 0.0)
+        basis = report.get("basis")
+        basis_str = f"{basis:+.2f}" if basis is not None else "N/A"
+        synth_str = f"{report['synthetic_future']:.2f}" if report.get("synthetic_future") else "N/A"
+
+        inputs = {
+            "source_desc": source_desc,
+            "underlying": report.get("underlying"),
+            "expiry_date": report.get("expiry_date"),
+            "days_to_expiry": report.get("days_to_expiry"),
+            "snapshot_time": report.get("timestamp_str"),
+            "snapshots_today": report.get("snapshots_count_today", 1),
+            "spot_and_basis": (
+                f"Spot LTP: {spot_ltp:,.2f} vs Session VWAP: {spot_vwap:,.2f} (Diff: {spot_ltp - spot_vwap:+.2f}) | "
+                f"Synthetic Future: {synth_str} (Carry Basis: {basis_str})"
+            ),
+            "straddle_and_vol": (
+                f"ATM {int(atm_strike)} Straddle LTP: ₹{float(report.get('atm_straddle_ltp') or 0):,.2f} vs "
+                f"Open Straddle: ₹{float(report.get('opening_straddle') or 0):,.2f} ({float(report.get('straddle_change_pct') or 0):+.2f}%)"
+            ),
+            "oi_and_pcr": (
+                f"Near-ATM PCR: {float(report.get('overall_pcr') or 0):.2f} | "
+                f"15m PE dOI: {int(report.get('near_pe_doi_15m') or 0):+,} vs 15m CE dOI: {int(report.get('near_ce_doi_15m') or 0):+,} | "
+                f"OI Walls: {int(report.get('support_strike') or 0)} PE (Sup) / {int(report.get('resistance_strike') or 0)} CE (Res)"
+            ),
+            "atm_ce_contract": (
+                f"{atm_ce.get('symbol', 'ATM_CE')}: LTP ₹{float(atm_ce.get('ltp') or 0):.2f} vs Option VWAP ₹{float(atm_ce.get('vwap') or 0):.2f} "
+                f"(3m dLTP {float(atm_ce.get('dltp_3m') or 0):+.2f}) | Quadrant: {atm_ce.get('quadrant', 'NEUTRAL')} "
+                f"(3m dOI {int(atm_ce.get('doi_3m') or 0):+,}) | Vol Burst: {float(atm_ce.get('vol_burst_ratio') or 0):.2f}x "
+                f"(BidQty {int(atm_ce.get('bid_qty') or 0)} vs AskQty {int(atm_ce.get('ask_qty') or 0)}) | "
+                f"IV: {float(atm_ce.get('implied_volatility') or 0):.1f}% (3m dIV {float(atm_ce.get('div_3m') or 0):+.2f}%) | "
+                f"Delta: {float(atm_ce.get('delta') or 0):.2f} | Daily Theta Bleed: {float(atm_ce.get('theta_bleed_pct') or 0):.1f}%"
+            ),
+            "atm_pe_contract": (
+                f"{atm_pe.get('symbol', 'ATM_PE')}: LTP ₹{float(atm_pe.get('ltp') or 0):.2f} vs Option VWAP ₹{float(atm_pe.get('vwap') or 0):.2f} "
+                f"(3m dLTP {float(atm_pe.get('dltp_3m') or 0):+.2f}) | Quadrant: {atm_pe.get('quadrant', 'NEUTRAL')} "
+                f"(3m dOI {int(atm_pe.get('doi_3m') or 0):+,}) | Vol Burst: {float(atm_pe.get('vol_burst_ratio') or 0):.2f}x "
+                f"(BidQty {int(atm_pe.get('bid_qty') or 0)} vs AskQty {int(atm_pe.get('ask_qty') or 0)}) | "
+                f"IV: {float(atm_pe.get('implied_volatility') or 0):.1f}% (3m dIV {float(atm_pe.get('div_3m') or 0):+.2f}%) | "
+                f"|Delta|: {abs(float(atm_pe.get('delta') or 0)):.2f} | Daily Theta Bleed: {float(atm_pe.get('theta_bleed_pct') or 0):.1f}%"
+            ),
+        }
+
+        if ce_score >= 3 or pe_score >= 3:
+            journal_note = (
+                f"Logged to Setup Journal (CE {ce_score}/6, PE {pe_score}/6 met >= 3/6 threshold) -> doc/TRADING_JOURNAL.md"
+            )
+        else:
+            journal_note = (
+                f"Not logged to Setup Journal yet (CE {ce_score}/6, PE {pe_score}/6 both < 3/6 threshold)"
+            )
+
+        return {
+            "cycle_id": self.eval_cycle_count,
+            "wall_time": self.last_eval_wall_time or dt.datetime.now().strftime("%H:%M:%S"),
+            "status": "EVALUATED",
+            "inputs": inputs,
+            "ce_eval": {
+                "symbol": atm_ce.get("symbol", f"{int(atm_strike)}CE"),
+                "score": ce_score,
+                "passed": ce_passed,
+                "missing": ce_missing,
+            },
+            "pe_eval": {
+                "symbol": atm_pe.get("symbol", f"{int(atm_strike)}PE"),
+                "score": pe_score,
+                "passed": pe_passed,
+                "missing": pe_missing,
+            },
+            "verdict": {
+                "action": action,
+                "journal_note": journal_note,
+            },
+        }
+
     def _serialize_state(self, store: SnapshotStore) -> Dict[str, Any]:
         cur = store.conn.cursor()
         cur.execute(
@@ -536,6 +653,18 @@ class AnalyzerAppState:
             else "Waiting for Option Chain snapshot..."
         )
         notifier = WhatsAppNotifier(store)
+        eval_trace = self._build_evaluation_trace(self.last_report)
+        if eval_trace.get("status") == "EVALUATED":
+            ce_eval = eval_trace.get("ce_eval") or {}
+            pe_eval = eval_trace.get("pe_eval") or {}
+            v_info = eval_trace.get("verdict") or {}
+            inp = eval_trace.get("inputs") or {}
+            print(
+                f"  [EVAL #{eval_trace.get('cycle_id')} @ {eval_trace.get('wall_time')}] "
+                f"{inp.get('source_desc')} | {inp.get('spot_and_basis')} | "
+                f"CE Score={ce_eval.get('score', 0)}/6 | PE Score={pe_eval.get('score', 0)}/6 | "
+                f"Verdict={v_info.get('action')}"
+            )
 
         return {
             "mode": self.mode,
@@ -547,6 +676,7 @@ class AnalyzerAppState:
             "demo_total_steps": len(self.demo_scenarios),
             "error": self.last_error,
             "report": self.last_report,
+            "eval_trace": eval_trace,
             "history": history,
             "trades": trades,
             "whatsapp": {
@@ -904,6 +1034,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
     <div class="brand">
       <span>⚡ LearnOT Option Buying Desk</span>
       <span id="modeBadge" class="badge badge-demo">DEMO SIMULATION</span>
+      <span id="engineHeartbeatBadge" class="badge badge-sim" style="font-variant-numeric:tabular-nums;">🟢 ENGINE ACTIVE | Cycle #1</span>
     </div>
 
     <div class="controls">
@@ -924,13 +1055,14 @@ INDEX_HTML = r"""<!DOCTYPE html>
       <button onclick="saveApiKey()">Save Key</button>
 
       <button id="stepBtn" class="btn-amber" onclick="refreshData(true)">▶ Next Demo Snapshot (1/5)</button>
-      <button class="btn-primary" onclick="refreshData(false)">↻ Refresh Now</button>
+      <button class="btn-primary" onclick="refreshData(false)">↻ Evaluate Now</button>
 
       <select id="autoRefreshSelect" onchange="toggleAutoRefresh()">
-        <option value="0">Auto-Poll: OFF</option>
-        <option value="180">Auto-Poll: 180s (3m NSE OI Cycle ★)</option>
+        <option value="180" selected>Auto-Poll: 180s (3m NSE OI Cycle ★)</option>
         <option value="60">Auto-Poll: 60s</option>
         <option value="30">Auto-Poll: 30s</option>
+        <option value="15">Auto-Step Demo: 15s</option>
+        <option value="0">Auto-Poll: OFF</option>
       </select>
     </div>
   </div>
@@ -998,6 +1130,31 @@ INDEX_HTML = r"""<!DOCTYPE html>
           <button class="btn-green" onclick="placePaperOrder('CE')">+ Practice Buy ATM CE</button>
           <button class="btn-red" onclick="placePaperOrder('PE')">+ Practice Buy ATM PE</button>
           <button class="btn-primary" onclick="sendWhatsAppNow()">📧 Send Setup Alert (Gmail)</button>
+        </div>
+      </div>
+
+      <!-- =================================================================== -->
+      <!-- LIVE OPTION CHAIN ANALYSIS & RULE EVALUATION LOG TRACER             -->
+      <!-- =================================================================== -->
+      <div class="card" style="margin-bottom:16px; border-color: rgba(6, 182, 212, 0.55); background: #0b1120;">
+        <div class="card-header" style="border-bottom-color: rgba(34, 211, 238, 0.25);">
+          <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+            <span style="color:#22d3ee;">🖥️ Live Option Chain Analysis &amp; Rule Evaluation Log Tracer</span>
+            <span id="tracerStatusPill" class="badge badge-sim">ANALYSING...</span>
+            <span id="tracerCountdownLabel" style="font-size:11.5px; color:var(--muted); font-variant-numeric:tabular-nums;">Next Poll: --</span>
+          </div>
+          <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap; font-size:12px;">
+            <label style="display:flex; align-items:center; gap:5px; cursor:pointer; color:#cbd5e1; font-weight:500;">
+              <input type="checkbox" id="chkClearEachCycle" checked />
+              Clear Log on Each Evaluation Cycle
+            </label>
+            <button type="button" onclick="clearLogTracer()">🧹 Clear Log</button>
+            <button type="button" class="btn-amber" onclick="refreshData(true)">▶ Step Next Demo Snapshot</button>
+            <button type="button" class="btn-primary" onclick="refreshData(false)">↻ Re-Evaluate Option Chain Now</button>
+          </div>
+        </div>
+        <div id="logTracerContainer" style="font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; line-height: 1.5; max-height: 360px; overflow-y: auto; padding: 4px 2px;">
+          Initializing Option Chain Analyzer Log Tracer...
         </div>
       </div>
 
@@ -1394,6 +1551,8 @@ INDEX_HTML = r"""<!DOCTYPE html>
 
   <script>
     let autoRefreshTimer = null;
+    let countdownTickTimer = null;
+    let countdownRemainingSec = 180;
     let latestReportCache = null;
     let prePlanFormInitializedForDate = null;
     let activeTab = "LIVE";
@@ -1426,7 +1585,36 @@ INDEX_HTML = r"""<!DOCTYPE html>
       return await res.json();
     }
 
+    function clearLogTracer() {
+      const box = document.getElementById("logTracerContainer");
+      if (box) {
+        box.innerHTML = `<div style="color:var(--muted); padding:8px;">🧹 Log Tracer cleared. Click "↻ Re-Evaluate Option Chain Now" or "▶ Step Next Demo Snapshot" to run a fresh evaluation cycle.</div>`;
+      }
+    }
+
+    function updateCountdownLabels() {
+      const sec = parseInt(document.getElementById("autoRefreshSelect").value, 10);
+      const hb = document.getElementById("engineHeartbeatBadge");
+      const cd = document.getElementById("tracerCountdownLabel");
+      const cycleNum = (latestReportCache && latestReportCache._cycle_id) || 1;
+      const wallTime = (latestReportCache && latestReportCache._wall_time) || "--:--:--";
+      if (sec > 0) {
+        if (hb) hb.textContent = `🟢 ENGINE ACTIVE | Cycle #${cycleNum} (${wallTime}) | Next Poll: ${countdownRemainingSec}s`;
+        if (cd) cd.textContent = `Next Evaluation Cycle in ${countdownRemainingSec}s`;
+      } else {
+        if (hb) hb.textContent = `🟡 MANUAL MODE | Cycle #${cycleNum} (${wallTime}) | Auto-Poll OFF`;
+        if (cd) cd.textContent = `Auto-Poll OFF (Click Re-Evaluate or Step Demo)`;
+      }
+    }
+
     async function refreshData(advanceDemo = false) {
+      const pill = document.getElementById("tracerStatusPill");
+      if (pill) {
+        pill.className = "badge badge-demo";
+        pill.textContent = "⚡ ANALYSING OPTION CHAIN...";
+      }
+      const sec = parseInt(document.getElementById("autoRefreshSelect").value, 10);
+      if (sec > 0) countdownRemainingSec = sec;
       const data = await apiCall("/api/state?advance=" + (advanceDemo ? "1" : "0"));
       renderState(data);
     }
@@ -1627,9 +1815,109 @@ INDEX_HTML = r"""<!DOCTYPE html>
 
     function toggleAutoRefresh() {
       if (autoRefreshTimer) clearInterval(autoRefreshTimer);
+      if (countdownTickTimer) clearInterval(countdownTickTimer);
       const sec = parseInt(document.getElementById("autoRefreshSelect").value, 10);
+      countdownRemainingSec = sec;
+      updateCountdownLabels();
       if (sec > 0) {
-        autoRefreshTimer = setInterval(() => refreshData(false), sec * 1000);
+        countdownTickTimer = setInterval(() => {
+          countdownRemainingSec = Math.max(0, countdownRemainingSec - 1);
+          updateCountdownLabels();
+          if (countdownRemainingSec === 0) {
+            countdownRemainingSec = sec;
+            const isDemoStep = (sec === 15 && document.getElementById("modeSelect").value === "DEMO");
+            refreshData(isDemoStep);
+          }
+        }, 1000);
+      }
+    }
+
+    function renderLogTracer(trace) {
+      if (!trace || !trace.inputs) return;
+      const container = document.getElementById("logTracerContainer");
+      const pill = document.getElementById("tracerStatusPill");
+      const clearEach = document.getElementById("chkClearEachCycle").checked;
+
+      if (pill) {
+        pill.className = "badge badge-sim";
+        pill.textContent = `✓ EVALUATED CYCLE #${trace.cycle_id} @ ${trace.wall_time}`;
+      }
+
+      const inp = trace.inputs;
+      const ce = trace.ce_eval || { passed: [], missing: [], score: 0 };
+      const pe = trace.pe_eval || { passed: [], missing: [], score: 0 };
+      const vd = trace.verdict || {};
+
+      const renderRuleList = (items, isPass) => {
+        if (!items || items.length === 0) {
+          return `<div style="color:var(--muted); padding-left:8px;">${isPass ? '• None met yet (0/6)' : '• 🎉 NONE MISSING — ALL 6 CONDITIONS MET!'}</div>`;
+        }
+        return items.map(item => `
+          <div style="padding-left:8px; margin-top:2px; color:${isPass ? '#86efac' : '#fca5a5'};">
+            <b>${isPass ? '✔ [MET]' : '✘ [MISSING]'} ${item.rule}:</b> <span style="color:#e2e8f0">${item.detail}</span>
+          </div>
+        `).join("");
+      };
+
+      const cycleHtml = `
+        <div style="border:1px solid rgba(51,65,85,0.9); border-radius:8px; padding:10px 12px; margin-bottom:10px; background:rgba(15,23,42,0.92);">
+          <div style="display:flex; justify-content:space-between; flex-wrap:wrap; border-bottom:1px dashed rgba(148,163,184,0.25); padding-bottom:6px; margin-bottom:8px;">
+            <span style="color:#22d3ee; font-weight:700;">
+              [STEP 1 — ENGINE EVALUATION CYCLE #${trace.cycle_id}] Evaluated @ ${trace.wall_time} IST | Source: ${inp.source_desc}
+            </span>
+            <span style="color:#fbbf24; font-weight:700;">
+              Snapshot Time: ${inp.snapshot_time} (${inp.underlying} Expiry ${inp.expiry_date} — ${inp.days_to_expiry}d | Snapshots Today: ${inp.snapshots_today})
+            </span>
+          </div>
+
+          <div style="margin-bottom:8px;">
+            <div style="color:#93c5fd; font-weight:700; margin-bottom:3px;">[STEP 2 — RAW OPTION CHAIN INPUTS CONSIDERED FOR EVALUATION]</div>
+            <div style="padding-left:8px; color:#cbd5e1;">
+              <div>• <b>Spot &amp; Futures Basis :</b> ${inp.spot_and_basis}</div>
+              <div>• <b>Straddle &amp; Volatility:</b> ${inp.straddle_and_vol}</div>
+              <div>• <b>OI &amp; PCR Battle      :</b> ${inp.oi_and_pcr}</div>
+              <div style="color:#86efac;">• <b>ATM Call (CE) Inputs :</b> ${inp.atm_ce_contract}</div>
+              <div style="color:#fda4af;">• <b>ATM Put  (PE) Inputs :</b> ${inp.atm_pe_contract}</div>
+            </div>
+          </div>
+
+          <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(360px, 1fr)); gap:10px; margin-bottom:8px;">
+            <div style="background:rgba(16,185,129,0.06); border:1px solid rgba(16,185,129,0.3); border-radius:6px; padding:8px 10px;">
+              <div style="font-weight:700; color:#34d399; margin-bottom:4px;">
+                [STEP 3 — BULLISH ATM CE EVALUATION: ${ce.symbol} &rarr; Score ${ce.score}/6]
+              </div>
+              <div style="font-weight:700; color:#86efac; font-size:11px; margin-top:4px;">✅ CONDITIONS MET (${ce.passed.length} Passed):</div>
+              ${renderRuleList(ce.passed, true)}
+              <div style="font-weight:700; color:#fca5a5; font-size:11px; margin-top:6px;">❌ MISSING CONDITIONS (${ce.missing.length} Blocking 6/6):</div>
+              ${renderRuleList(ce.missing, false)}
+            </div>
+
+            <div style="background:rgba(244,63,94,0.06); border:1px solid rgba(244,63,94,0.3); border-radius:6px; padding:8px 10px;">
+              <div style="font-weight:700; color:#fb7185; margin-bottom:4px;">
+                [STEP 4 — BEARISH ATM PE EVALUATION: ${pe.symbol} &rarr; Score ${pe.score}/6]
+              </div>
+              <div style="font-weight:700; color:#86efac; font-size:11px; margin-top:4px;">✅ CONDITIONS MET (${pe.passed.length} Passed):</div>
+              ${renderRuleList(pe.passed, true)}
+              <div style="font-weight:700; color:#fca5a5; font-size:11px; margin-top:6px;">❌ MISSING CONDITIONS (${pe.missing.length} Blocking 6/6):</div>
+              ${renderRuleList(pe.missing, false)}
+            </div>
+          </div>
+
+          <div style="border-top:1px dashed rgba(148,163,184,0.25); padding-top:6px; display:flex; justify-content:space-between; flex-wrap:wrap; gap:8px;">
+            <span><b style="color:#22d3ee;">[STEP 5 — FINAL ENGINE VERDICT]:</b> <b style="color:#f8fafc;">${vd.action}</b></span>
+            <span style="color:#fbbf24;">📓 ${vd.journal_note}</span>
+          </div>
+        </div>
+      `;
+
+      if (clearEach) {
+        container.innerHTML = cycleHtml;
+      } else {
+        if (container.innerHTML.includes("Initializing") || container.innerHTML.includes("cleared")) {
+          container.innerHTML = cycleHtml;
+        } else {
+          container.innerHTML = cycleHtml + container.innerHTML;
+        }
       }
     }
 
@@ -1696,6 +1984,12 @@ INDEX_HTML = r"""<!DOCTYPE html>
       const rep = state.report;
       if (!rep) return;
       latestReportCache = rep;
+      if (state.eval_trace) {
+        latestReportCache._cycle_id = state.eval_trace.cycle_id;
+        latestReportCache._wall_time = state.eval_trace.wall_time;
+        renderLogTracer(state.eval_trace);
+      }
+      updateCountdownLabels();
 
       // KPI Strip
       const spotDiff = rep.spot_ltp - rep.spot_vwap;
@@ -2080,8 +2374,9 @@ INDEX_HTML = r"""<!DOCTYPE html>
       }
     }
 
-    // Initial load
+    // Initial load + start auto-poll countdown timer
     refreshData(false);
+    toggleAutoRefresh();
   </script>
 </body>
 </html>
