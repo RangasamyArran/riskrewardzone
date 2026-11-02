@@ -1,4 +1,4 @@
-# LearnOT Daily Trading & Fine-Tuning Journal (2026-11-01 — NIFTY)
+# LearnOT Daily Trading & Fine-Tuning Journal (2026-11-02 — NIFTY)
 
 > **How to Use This Journal:**
 > 1. **🌅 Section 0 (Pre-Market Sentiment Signal vs. Post-Market Deviation):** Synthesizes GIFT/SGX Nifty, Global Sentiment, Prev Day PCR (Reversal vs Trend), and India VIX (`13.5–16.5` Goldilocks vs High-IV No-Trade) into a Pre-Market Signal and audits how your trades matched or deviated.
@@ -10,13 +10,14 @@
 
 ## 0. Pre-Market Sentiment Signal vs. Post-Market Deviation Review
 
-| Metric | Morning Pre-Market Sentiment (`09:00 AM`) | Actual Intraday Outcome (`09:15 AM – 03:30 PM`) | System Signal & Deviation Verdict |
+| Metric | Morning Pre-Market Sentiment (`06:30 AM – 09:08 AM`) | Actual Intraday Outcome (`09:15 AM – 03:30 PM`) | System Signal & Deviation Verdict |
 | :--- | :--- | :--- | :--- |
-| **GIFT Nifty & Global Cues** | GIFT Gap: `+22.0` pts / Global: `MILD_BULLISH` / FII: `FII_NET_LONG` | Open `24495.0` / High `24536.0` / Low `24495.0` / Close `24536.0` | **`FLAT / COILED-SPRING OPEN (+22 pts)`** |
-| **Prev Day PCR & VIX Regime** | Prev Day PCR: **`1.18`** / India VIX: **`14.5`** (`NORMAL_DAY`) | Intraday Range: `41.0` pts (Walls: `24400 PE` – `24500 CE`) | `🟢 GOLDILOCKS OPTION BUYING DAY (VIX 14.5 in 13.5–16.5 Sweet Spot: No IV bloat, steady Gamma expansion, ideal for +25% / +45% targets!)` |
-| **System Pre-Market Signal** | **`🎯 COILED-SPRING BREAKOUT DAY (Flat Open + Ideal VIX -> Wait for 09:20 AM 15m dOI & Trade Bull/Bear Trigger Breakout)`** | `✅ Bull Trigger (24510) CROSSED (High 24536.0) ;; 🛡️ Bear Trigger (24440) held (Low 24495.0) ;; Broke PDH (24520)` | PDH `24520` / PDL `24390` / PDC `24470` |
-| **Planned Bias & Triggers** | Bias: **`BULLISH_ABOVE_TRIGGER`** (Bull `>24510` / Bear `<24440`) | Trades Taken: **`0/2`** (PnL: `₹+0.00`) | **`PARTIAL MATCH (85%)`** |
-| **Execution vs. Pre-Plan** | *Morning Note:* GIFT Nifty +22, VIX 14.5 (Goldilocks 14-16 zone), Prev PCR 1.18 Bullish -> Buy ATM 24500 CE above 24510 when Call Writers cover. | *Post-Market Note:* Waited patiently through 09:21 AM 5/6 setup; entered on 09:24 AM 6/6 breakout above 24510. | 💡 MISSED PLANNED SETUP: Pre-plan trigger + 6/6 Signal fired (CE:1, PE:0), but 0 trades executed ;; ✔️ Trade Count Discipline (0/2 max) |
+| **🌍 Global Indicators (`6:30–8:00 AM`)** | GIFT Gap: `+22.0` pts / US Close: `MILD_BULLISH` / Asia (Nikkei/HangSeng): `POSITIVE_MOMENTUM` | Open `24495.0` / High `24536.0` / Low `24495.0` / Close `24536.0` | **`BULLISH CONFLUENCE OPEN (+22 pts / 5/8 Bullish Cues)`** |
+| **📊 Macro & Institutional Triggers** | FII/DII: `FII_NET_LONG` / Brent Crude: `STABLE_NEUTRAL` / DXY & USDINR: `STABLE_NEUTRAL` | Intraday Range: `41.0` pts (Walls: `24400 PE` – `24500 CE`) | Bull Cues: `5/8` / Bear Cues: `0/8` |
+| **🇮🇳 Domestic (`9:00–9:08 AM`) & VIX/PCR** | 09:08 Adv/Dec: `MODERATE_ADVANCES` / India VIX: **`14.5`** / Prev PCR: **`1.18`** | `✅ Bull Trigger (24510) CROSSED (High 24536.0) ;; 🛡️ Bear Trigger (24440) held (Low 24495.0) ;; Broke PDH (24520)` | `🟢 GOLDILOCKS OPTION BUYING DAY (VIX 14.5 in 13.5–16.5 Sweet Spot: Steady IV, no crush, ideal for +25% / +45% Gamma Blast targets!)` |
+| **🧠 System Pre-Market Signal** | **`🚀 BULLISH CONTINUATION SIGNAL (5/8 Pre-Market Cues Bullish + VIX 14.5 -> Buy ATM CE above Bull Trigger)`** | PDH `24520` / PDL `24390` / PDC `24470` | 09:08 Equilibrium: `24492.0` |
+| **🎯 Planned Bias & Triggers** | Bias: **`BULLISH_ABOVE_TRIGGER`** (Bull `>24510` / Bear `<24440`) | Trades Taken: **`0/2`** (PnL: `₹+0.00`) | **`PARTIAL MATCH (85%)`** |
+| **📓 Execution vs. Pre-Plan** | *Morning Note:* GIFT Nifty +22, VIX 14.5 (Goldilocks 14-16 zone), Prev PCR 1.18 Bullish -> Buy ATM 24500 CE above 24510 when Call Writers cover. | *Post-Market Note:* Waited patiently through 09:21 AM 5/6 setup; entered on 09:24 AM 6/6 breakout above 24510. | 💡 MISSED PLANNED SETUP: Pre-plan trigger + 6/6 Signal fired (CE:1, PE:0), but 0 trades executed ;; ✔️ Trade Count Discipline (0/2 max) |
 
 ---
 
@@ -33,7 +34,7 @@
 
 ## 2. Setup-by-Setup Breakdown: What Was Good vs. Why It Missed 6/6
 
-### Entry #1 — `22:11:15` | **NIFTY05NOV2624500PE** (PE) — **3/6** [🔵 WATCH (3/6)]
+### Entry #1 — `06:37:16` | **NIFTY06NOV2624500PE** (PE) — **3/6** [🔵 WATCH (3/6)]
 * **Option Chain Context:** Spot `24495.0` (VWAP `24495.0`) | PCR `0.89` | 3m dOI `+0` (`NEUTRAL`) | 15m PE dOI `+0` vs CE dOI `+0` | Vol Ratio `1.00x` | IV `13.2%` | Delta `-0.46` | Theta Bleed `11.0%`
 * **✅ What Was Good Today (3 Conditions Met):**
   - ✔️ **R1: Spot/Basis Trend (Spot 24495.0 vs VWAP 24495.0 (Basis +7.0))**
@@ -45,7 +46,7 @@
   - ❌ **R4: Volume Burst (Vol Ratio 1.00x, BidQty 1625 vs AskQty 1450)**
 * **📈 Forward Outcome & Verdict:** Entry LTP `₹98.00` &rarr; Latest `₹76.00` | **Max LTP After:** `₹98.00` (**`+0.0%`**) &rarr; **FILTER SAVED LOSS (-22.4%)**
 
-### Entry #2 — `22:11:15` | **NIFTY05NOV2624500CE** (CE) — **3/6** [🔵 WATCH (3/6)]
+### Entry #2 — `06:37:16` | **NIFTY06NOV2624500CE** (CE) — **3/6** [🔵 WATCH (3/6)]
 * **Option Chain Context:** Spot `24495.0` (VWAP `24495.0`) | PCR `0.89` | 3m dOI `+0` (`NEUTRAL`) | 15m PE dOI `+0` vs CE dOI `+0` | Vol Ratio `1.00x` | IV `12.8%` | Delta `0.54` | Theta Bleed `11.1%`
 * **✅ What Was Good Today (3 Conditions Met):**
   - ✔️ **R1: Spot/Basis Trend (Spot 24495.0 vs VWAP 24495.0 (Basis +7.0))**
@@ -57,7 +58,7 @@
   - ❌ **R4: Volume Burst (Vol Ratio 1.00x, BidQty 1950 vs AskQty 1300)**
 * **📈 Forward Outcome & Verdict:** Entry LTP `₹104.00` &rarr; Latest `₹126.50` | **Max LTP After:** `₹126.50` (**`+21.6%`**) &rarr; **MISSED WINNER (+21.6% -> Tune Missing Rule!)**
 
-### Entry #3 — `22:14:15` | **NIFTY05NOV2624500CE** (CE) — **5/6** [🟡 NEAR-MISS (5/6)]
+### Entry #3 — `06:40:16` | **NIFTY06NOV2624500CE** (CE) — **5/6** [🟡 NEAR-MISS (5/6)]
 * **Option Chain Context:** Spot `24508.0` (VWAP `24501.5`) | PCR `0.96` | 3m dOI `+20,000` (`LONG_BUILDUP`) | 15m PE dOI `+1,070,000` vs CE dOI `+100,000` | Vol Ratio `1.00x` | IV `12.9%` | Delta `0.54` | Theta Bleed `10.5%`
 * **✅ What Was Good Today (5 Conditions Met):**
   - ✔️ **R1: Spot/Basis Trend (Spot 24508.0 vs VWAP 24501.5 (Basis +6.0))**
@@ -69,7 +70,7 @@
   - ❌ **R4: Volume Burst (Vol Ratio 1.00x, BidQty 1950 vs AskQty 1300)**
 * **📈 Forward Outcome & Verdict:** Entry LTP `₹110.00` &rarr; Latest `₹126.50` | **Max LTP After:** `₹126.50` (**`+15.0%`**) &rarr; **MISSED WINNER (+15.0% -> Tune Missing Rule!)**
 
-### Entry #4 — `22:17:15` | **NIFTY05NOV2624500PE** (PE) — **3/6** [🔵 WATCH (3/6)]
+### Entry #4 — `06:43:16` | **NIFTY06NOV2624500PE** (PE) — **3/6** [🔵 WATCH (3/6)]
 * **Option Chain Context:** Spot `24536.0` (VWAP `24513.0`) | PCR `1.09` | 3m dOI `+700,000` (`SHORT_BUILDUP`) | 15m PE dOI `+2,500,000` vs CE dOI `-360,000` | Vol Ratio `1.38x` | IV `12.9%` | Delta `-0.46` | Theta Bleed `14.2%`
 * **✅ What Was Good Today (3 Conditions Met):**
   - ✔️ **R4: Volume Burst (Vol Ratio 1.38x, BidQty 1625 vs AskQty 1450)**
@@ -81,7 +82,7 @@
   - ❌ **R3: Trapped Writers / PCR / dOI (15m CE dOI -360,000 vs PE dOI +2,500,000, PE: SHORT_BUILDUP, PCR 1.09)**
 * **📈 Forward Outcome & Verdict:** Entry LTP `₹76.00` &rarr; Latest `₹76.00` | **Max LTP After:** `₹76.00` (**`+0.0%`**) &rarr; **NEW ENTRY (Tracking...)**
 
-### Entry #5 — `22:17:15` | **NIFTY05NOV2624500CE** (CE) — **6/6** [🟢 FULL 6/6 TRIGGER]
+### Entry #5 — `06:43:16` | **NIFTY06NOV2624500CE** (CE) — **6/6** [🟢 FULL 6/6 TRIGGER]
 * **Option Chain Context:** Spot `24536.0` (VWAP `24513.0`) | PCR `1.09` | 3m dOI `-340,000` (`SHORT_COVERING`) | 15m PE dOI `+2,500,000` vs CE dOI `-360,000` | Vol Ratio `2.50x` | IV `13.4%` | Delta `0.54` | Theta Bleed `9.1%`
 * **✅ What Was Good Today (6 Conditions Met):**
   - ✔️ **R1: Spot/Basis Trend (Spot 24536.0 vs VWAP 24513.0 (Basis +8.0))**
@@ -99,11 +100,11 @@
 
 | Time | Symbol | Side | Score | Entry LTP | Max LTP After | Max Gain % | Verdict | What Was Good (Passed) | Why It Missed 6/6 (Failed) |
 | :--- | :--- | :---: | :---: | :---: | :---: | :---: | :--- | :--- | :--- |
-| `22:11:15` | **NIFTY05NOV2624500PE** | PE | **3/6** | ₹98.00 | ₹98.00 | **`+0.0%`** | **FILTER SAVED LOSS (-22.4%)** | R1: Spot/Basis Trend (Spot 24495.0 vs VWAP 24495.0 (Basis +7.0)) ;; R5: IV Stability (PE IV 13.20% (3m dIV +0.00%)) ;; R6: Greeks & Theta (/Delta/ 0.46, Daily Theta Bleed 11.0% (Max 18%)) | R2: Option > VWAP (PE LTP 98.00 vs VWAP 98.00 (3m dLTP +0.00)) ;; R3: Trapped Writers / PCR / dOI (15m CE dOI +0 vs PE dOI +0, PE: NEUTRAL, PCR 0.89) ;; R4: Volume Burst (Vol Ratio 1.00x, BidQty 1625 vs AskQty 1450) |
-| `22:11:15` | **NIFTY05NOV2624500CE** | CE | **3/6** | ₹104.00 | ₹126.50 | **`+21.6%`** | **MISSED WINNER (+21.6% -> Tune Missing Rule!)** | R1: Spot/Basis Trend (Spot 24495.0 vs VWAP 24495.0 (Basis +7.0)) ;; R5: IV Stability (CE IV 12.80% (3m dIV +0.00%)) ;; R6: Greeks & Theta (Delta 0.54, Daily Theta Bleed 11.1% (Max 18%)) | R2: Option > VWAP (CE LTP 104.00 vs VWAP 104.00 (3m dLTP +0.00)) ;; R3: Trapped Writers / PCR / dOI (15m PE dOI +0 vs CE dOI +0, CE: NEUTRAL, PCR 0.89) ;; R4: Volume Burst (Vol Ratio 1.00x, BidQty 1950 vs AskQty 1300) |
-| `22:14:15` | **NIFTY05NOV2624500CE** | CE | **5/6** | ₹110.00 | ₹126.50 | **`+15.0%`** | **MISSED WINNER (+15.0% -> Tune Missing Rule!)** | R1: Spot/Basis Trend (Spot 24508.0 vs VWAP 24501.5 (Basis +6.0)) ;; R2: Option > VWAP (CE LTP 110.00 vs VWAP 105.20 (3m dLTP +6.00)) ;; R3: Trapped Writers / PCR / dOI (15m PE dOI +1,070,000 vs CE dOI +100,000, CE: LONG_BUILDUP, PCR 0.96) ;; R5: IV Stability (CE IV 12.90% (3m dIV +0.10%)) ;; R6: Greeks & Theta (Delta 0.54, Daily Theta Bleed 10.5% (Max 18%)) | R4: Volume Burst (Vol Ratio 1.00x, BidQty 1950 vs AskQty 1300) |
-| `22:17:15` | **NIFTY05NOV2624500PE** | PE | **3/6** | ₹76.00 | ₹76.00 | **`+0.0%`** | **NEW ENTRY (Tracking...)** | R4: Volume Burst (Vol Ratio 1.38x, BidQty 1625 vs AskQty 1450) ;; R5: IV Stability (PE IV 12.90% (3m dIV -0.20%)) ;; R6: Greeks & Theta (/Delta/ 0.46, Daily Theta Bleed 14.2% (Max 18%)) | R1: Spot/Basis Trend (Spot 24536.0 vs VWAP 24513.0 (Basis +8.0)) ;; R2: Option > VWAP (PE LTP 76.00 vs VWAP 90.90 (3m dLTP -15.00)) ;; R3: Trapped Writers / PCR / dOI (15m CE dOI -360,000 vs PE dOI +2,500,000, PE: SHORT_BUILDUP, PCR 1.09) |
-| `22:17:15` | **NIFTY05NOV2624500CE** | CE | **6/6** | ₹126.50 | ₹126.50 | **`+0.0%`** | **6/6 TRIGGERED (0.0%)** | R1: Spot/Basis Trend (Spot 24536.0 vs VWAP 24513.0 (Basis +8.0)) ;; R2: Option > VWAP (CE LTP 126.50 vs VWAP 112.30 (3m dLTP +16.50)) ;; R3: Trapped Writers / PCR / dOI (15m PE dOI +2,500,000 vs CE dOI -360,000, CE: SHORT_COVERING, PCR 1.09) ;; R4: Volume Burst (Vol Ratio 2.50x, BidQty 1950 vs AskQty 1300) ;; R5: IV Stability (CE IV 13.40% (3m dIV +0.50%)) ;; R6: Greeks & Theta (Delta 0.54, Daily Theta Bleed 9.1% (Max 18%)) | NONE (All 6 Met!) |
+| `06:37:16` | **NIFTY06NOV2624500PE** | PE | **3/6** | ₹98.00 | ₹98.00 | **`+0.0%`** | **FILTER SAVED LOSS (-22.4%)** | R1: Spot/Basis Trend (Spot 24495.0 vs VWAP 24495.0 (Basis +7.0)) ;; R5: IV Stability (PE IV 13.20% (3m dIV +0.00%)) ;; R6: Greeks & Theta (/Delta/ 0.46, Daily Theta Bleed 11.0% (Max 18%)) | R2: Option > VWAP (PE LTP 98.00 vs VWAP 98.00 (3m dLTP +0.00)) ;; R3: Trapped Writers / PCR / dOI (15m CE dOI +0 vs PE dOI +0, PE: NEUTRAL, PCR 0.89) ;; R4: Volume Burst (Vol Ratio 1.00x, BidQty 1625 vs AskQty 1450) |
+| `06:37:16` | **NIFTY06NOV2624500CE** | CE | **3/6** | ₹104.00 | ₹126.50 | **`+21.6%`** | **MISSED WINNER (+21.6% -> Tune Missing Rule!)** | R1: Spot/Basis Trend (Spot 24495.0 vs VWAP 24495.0 (Basis +7.0)) ;; R5: IV Stability (CE IV 12.80% (3m dIV +0.00%)) ;; R6: Greeks & Theta (Delta 0.54, Daily Theta Bleed 11.1% (Max 18%)) | R2: Option > VWAP (CE LTP 104.00 vs VWAP 104.00 (3m dLTP +0.00)) ;; R3: Trapped Writers / PCR / dOI (15m PE dOI +0 vs CE dOI +0, CE: NEUTRAL, PCR 0.89) ;; R4: Volume Burst (Vol Ratio 1.00x, BidQty 1950 vs AskQty 1300) |
+| `06:40:16` | **NIFTY06NOV2624500CE** | CE | **5/6** | ₹110.00 | ₹126.50 | **`+15.0%`** | **MISSED WINNER (+15.0% -> Tune Missing Rule!)** | R1: Spot/Basis Trend (Spot 24508.0 vs VWAP 24501.5 (Basis +6.0)) ;; R2: Option > VWAP (CE LTP 110.00 vs VWAP 105.20 (3m dLTP +6.00)) ;; R3: Trapped Writers / PCR / dOI (15m PE dOI +1,070,000 vs CE dOI +100,000, CE: LONG_BUILDUP, PCR 0.96) ;; R5: IV Stability (CE IV 12.90% (3m dIV +0.10%)) ;; R6: Greeks & Theta (Delta 0.54, Daily Theta Bleed 10.5% (Max 18%)) | R4: Volume Burst (Vol Ratio 1.00x, BidQty 1950 vs AskQty 1300) |
+| `06:43:16` | **NIFTY06NOV2624500PE** | PE | **3/6** | ₹76.00 | ₹76.00 | **`+0.0%`** | **NEW ENTRY (Tracking...)** | R4: Volume Burst (Vol Ratio 1.38x, BidQty 1625 vs AskQty 1450) ;; R5: IV Stability (PE IV 12.90% (3m dIV -0.20%)) ;; R6: Greeks & Theta (/Delta/ 0.46, Daily Theta Bleed 14.2% (Max 18%)) | R1: Spot/Basis Trend (Spot 24536.0 vs VWAP 24513.0 (Basis +8.0)) ;; R2: Option > VWAP (PE LTP 76.00 vs VWAP 90.90 (3m dLTP -15.00)) ;; R3: Trapped Writers / PCR / dOI (15m CE dOI -360,000 vs PE dOI +2,500,000, PE: SHORT_BUILDUP, PCR 1.09) |
+| `06:43:16` | **NIFTY06NOV2624500CE** | CE | **6/6** | ₹126.50 | ₹126.50 | **`+0.0%`** | **6/6 TRIGGERED (0.0%)** | R1: Spot/Basis Trend (Spot 24536.0 vs VWAP 24513.0 (Basis +8.0)) ;; R2: Option > VWAP (CE LTP 126.50 vs VWAP 112.30 (3m dLTP +16.50)) ;; R3: Trapped Writers / PCR / dOI (15m PE dOI +2,500,000 vs CE dOI -360,000, CE: SHORT_COVERING, PCR 1.09) ;; R4: Volume Burst (Vol Ratio 2.50x, BidQty 1950 vs AskQty 1300) ;; R5: IV Stability (CE IV 13.40% (3m dIV +0.50%)) ;; R6: Greeks & Theta (Delta 0.54, Daily Theta Bleed 9.1% (Max 18%)) | NONE (All 6 Met!) |
 
 ---
 

@@ -98,9 +98,13 @@ class AnalyzerAppState:
                 "pre_open_spot": round(24585.0 * scale, 2),
                 "gift_nifty_gap": round(35.0 * scale, 2),
                 "global_sentiment": "NEUTRAL_MIXED",
+                "asian_markets": "NEGATIVE_DRAG",
                 "prev_day_pcr": 1.54,
                 "india_vix": 15.2,
                 "fii_flow": "FII_NET_SHORT",
+                "brent_crude": "SPIKING_BEARISH",
+                "dxy_usdinr": "RISING_DXY_INR_WEAK",
+                "preopen_adv_dec": "MODERATE_DECLINES",
                 "event_context": "NORMAL_DAY",
                 "call_wall_strike": round(24600.0 * scale, 2),
                 "put_wall_strike": round(24500.0 * scale, 2),
@@ -144,9 +148,13 @@ class AnalyzerAppState:
                 "pre_open_spot": round(24492.0 * scale, 2),
                 "gift_nifty_gap": round(22.0 * scale, 2),
                 "global_sentiment": "MILD_BULLISH",
+                "asian_markets": "POSITIVE_MOMENTUM",
                 "prev_day_pcr": 1.18,
                 "india_vix": 14.5,
                 "fii_flow": "FII_NET_LONG",
+                "brent_crude": "COOLING_BULLISH",
+                "dxy_usdinr": "COOLING_INR_STRONG",
+                "preopen_adv_dec": "MODERATE_ADVANCES",
                 "event_context": "NORMAL_DAY",
                 "call_wall_strike": round(24500.0 * scale, 2),
                 "put_wall_strike": round(24400.0 * scale, 2),
@@ -154,7 +162,7 @@ class AnalyzerAppState:
                 "bull_trigger": round(24510.0 * scale, 2),
                 "bear_trigger": round(24440.0 * scale, 2),
                 "max_trades": 2,
-                "pre_plan_notes": f"GIFT Nifty +{int(22*scale)}, VIX 14.5 (14-16 Goldilocks Buying Zone), Prev PCR 1.18 Bullish -> Buy ATM {int(24500 * scale)} CE above {int(24510 * scale)}.",
+                "pre_plan_notes": f"GIFT Nifty +{int(22*scale)}, US/Asia Positive, Brent & DXY Cooling, VIX 14.5 (14-16 Goldilocks Zone), Prev PCR 1.18 -> Buy ATM {int(24500 * scale)} CE above {int(24510 * scale)}.",
                 "post_market_notes": "Waited for 6/6 confirmation before entering.",
             },
         )
@@ -1146,38 +1154,30 @@ INDEX_HTML = r"""<!DOCTYPE html>
     <!-- ===================================================================== -->
     <div id="tabPreMarketContent" style="display:none;">
 
-      <!-- Quick Reference Guide for Pre-Market Sentiment Identifiers -->
-      <div class="guide-grid">
+      <!-- 3-Stage Pre-Market Sentiment Checklist Reference Guide -->
+      <div class="guide-grid" style="grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));">
         <div class="guide-box">
-          <div style="font-weight:700; color:#22d3ee; margin-bottom:4px;">1. GIFT / SGX Nifty &amp; Global Cues</div>
-          <div style="color:#cbd5e1;">
-            • <b>Flat (-30 to +30):</b> Coiled spring — best for clean intraday breakout.<br/>
-            • <b>Moderate Gap (&plusmn;40 to &plusmn;110):</b> Trend day if ATM writers panic.<br/>
-            • <b>Huge Gap (&gt; &plusmn;120):</b> Profit-booking / Gap-fade risk at 09:15 AM!
+          <div style="font-weight:700; color:#22d3ee; margin-bottom:5px;">🌍 1. Global Indicators (Check 6:30 AM – 8:00 AM IST)</div>
+          <div style="color:#cbd5e1; line-height:1.45;">
+            • <b>GIFT Nifty (NSE IX):</b> Direct proxy for Nifty 50 opening. Positive/negative gap indicates gap-up or gap-down.<br/>
+            • <b>US Market Closing:</b> Check S&amp;P 500, Nasdaq &amp; Dow Jones overnight close. Strong US rallies trigger positive sentiment.<br/>
+            • <b>Asian Markets:</b> Early movements of <b>Nikkei 225</b> (Japan) &amp; <b>Hang Seng</b> (Hong Kong) set Asian intraday momentum.
           </div>
         </div>
         <div class="guide-box">
-          <div style="font-weight:700; color:#fbbf24; margin-bottom:4px;">2. Prev Day Closing PCR (Reversal vs Trend)</div>
-          <div style="color:#cbd5e1;">
-            • <b>PCR &ge; 1.45 (Overbought):</b> Too many Put writers! Watch for <b>Bearish Reversal</b> even on Gap-Up.<br/>
-            • <b>PCR 1.15–1.44:</b> Healthy Bullish Put support.<br/>
-            • <b>PCR &le; 0.65 (Oversold):</b> Watch for <b>Bullish Short-Covering Bounce</b>.
+          <div style="font-weight:700; color:#fbbf24; margin-bottom:5px;">📊 2. Macroeconomic &amp; Institutional Triggers</div>
+          <div style="color:#cbd5e1; line-height:1.45;">
+            • <b>FII &amp; DII Activity:</b> Continuous FII selling signals weak sentiment; strong DII buying provides a cushion.<br/>
+            • <b>Crude Oil (Brent Crude):</b> India imports &gt;80% of its oil. Spikes in Brent crude hurt inflation/margins (&rarr; Bearish).<br/>
+            • <b>Dollar Index (DXY) &amp; USD/INR:</b> Rising DXY &amp; weakening Rupee (USD/INR) prompt FIIs to pull capital out of India.
           </div>
         </div>
         <div class="guide-box">
-          <div style="font-weight:700; color:#34d399; margin-bottom:4px;">3. India VIX / IV Option Buying Regime</div>
-          <div style="color:#cbd5e1;">
-            • <b>VIX 13.5–16.5 (Goldilocks ★):</b> Steady IV, no crush — <b>Best for Option Buying!</b><br/>
-            • <b>VIX &lt; 11.5:</b> Low-vol chop; Theta eats slow options.<br/>
-            • <b>VIX &gt; 19.5 / Pre-Event:</b> <b>Better No-Trade Day</b> (Severe IV Crush risk).
-          </div>
-        </div>
-        <div class="guide-box">
-          <div style="font-weight:700; color:#f43f5e; margin-bottom:4px;">4. FII Flow &amp; Session Context</div>
-          <div style="color:#cbd5e1;">
-            • <b>FII Net Long + Bullish Global:</b> High-conviction CE trend.<br/>
-            • <b>FII Net Short + High PCR 1.5+:</b> Textbook intraday PE sell-off.<br/>
-            • <b>Weekly Expiry:</b> Trade only 09:20–11:15 AM &amp; 01:45–03:00 PM.
+          <div style="font-weight:700; color:#34d399; margin-bottom:5px;">🇮🇳 3. Domestic Pre-Market Data (Check 9:00 AM – 9:08 AM IST)</div>
+          <div style="color:#cbd5e1; line-height:1.45;">
+            • <b>NSE/BSE Pre-Open (9:00–9:08 AM):</b> Order collection stops at <b>9:08 AM</b> (Equilibrium Price). Check <b>Advance-Decline Ratio</b>.<br/>
+            • <b>India VIX (Volatility Index):</b> Sharp rise (&gt;19.5) = higher fear &amp; IV crush danger; <b>13.5–16.5 = Goldilocks Option Buying</b>; low VIX = stable confidence.<br/>
+            • <b>Prev Day Closing PCR:</b> <b>&ge;1.45 Overbought</b> (Bearish reversal watch) | <b>&le;0.65 Oversold</b> (Bullish short-covering bounce).
           </div>
         </div>
       </div>
@@ -1185,66 +1185,106 @@ INDEX_HTML = r"""<!DOCTYPE html>
       <!-- Pre-Market Input & Signal Generator Card -->
       <div class="card" style="margin-bottom:16px; border-color: rgba(6, 182, 212, 0.55);">
         <div class="card-header">
-          <span>🌅 Step 1: Enter Morning Pre-Market Sentiment Identifiers (08:55 AM – 09:15 AM)</span>
+          <span>🌅 Step 1: Complete Your Morning Pre-Market Sentiment Checklist (6:30 AM – 9:08 AM IST)</span>
           <div style="display:flex; flex-wrap:wrap; gap:6px; align-items:center;">
             <button type="button" onclick="loadPresetScenario('HIGH_PCR_REVERSAL')" title="Test Prev Day PCR 1.54 Overbought Reversal">🧪 Preset: PCR 1.54 Reversal</button>
             <button type="button" onclick="loadPresetScenario('GOLDILOCKS_BULL')" title="Test VIX 14.5 Goldilocks Option Buying">🧪 Preset: VIX 14.5 Bullish</button>
             <button type="button" onclick="loadPresetScenario('HIGH_IV_NO_TRADE')" title="Test VIX 21.5 High IV No-Trade Day">🧪 Preset: High IV 21.5 No-Trade</button>
             <button type="button" onclick="autoFillPrePlan()">⚡ Auto-Fill From Chain</button>
-            <button type="button" class="btn-primary" onclick="savePrePlan(false)">🧠 Generate Signal &amp; Save Plan</button>
+            <button type="button" class="btn-primary" onclick="savePrePlan(false)">🧠 Evaluate 8-Point Checklist &amp; Save Plan</button>
           </div>
         </div>
 
-        <!-- Row 1: The 6 Core Pre-Market Sentiment Identifiers -->
+        <!-- Stage 1 & Stage 2 Inputs -->
         <div style="font-size:11.5px; font-weight:700; color:#22d3ee; margin-bottom:6px; text-transform:uppercase;">
-          A. Pre-Market Sentiment Identifiers (SGX/GIFT Nifty, Global Cues, Prev Day PCR, India VIX, FII Flow)
+          🌍 Stage 1: Global Indicators (6:30–8:00 AM IST) &amp; 📊 Stage 2: Macroeconomic &amp; Institutional Triggers
         </div>
-        <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(175px, 1fr)); gap:10px; margin-bottom:14px;">
+        <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(195px, 1fr)); gap:10px; margin-bottom:14px;">
           <div>
-            <label style="font-size:11px; color:#22d3ee; font-weight:600; display:block; margin-bottom:3px;">GIFT / SGX Nifty Gap (Pts)</label>
+            <label style="font-size:11px; color:#22d3ee; font-weight:600; display:block; margin-bottom:3px;">1. GIFT Nifty Gap (NSE IX Pts)</label>
             <input type="number" step="1" id="ppGiftGap" placeholder="e.g. +35 or -60" style="width:100%;" />
           </div>
           <div>
-            <label style="font-size:11px; color:#22d3ee; font-weight:600; display:block; margin-bottom:3px;">Global Market Sentiment</label>
+            <label style="font-size:11px; color:#22d3ee; font-weight:600; display:block; margin-bottom:3px;">2. US Market Close (S&amp;P / Nasdaq / Dow)</label>
             <select id="ppGlobal" style="width:100%;">
-              <option value="STRONG_BULLISH">STRONG_BULLISH (US/Asia +1%)</option>
-              <option value="MILD_BULLISH">MILD_BULLISH (Positive Cues)</option>
-              <option value="NEUTRAL_MIXED">NEUTRAL_MIXED (Flat / Mixed)</option>
-              <option value="MILD_BEARISH">MILD_BEARISH (Negative Cues)</option>
-              <option value="STRONG_BEARISH">STRONG_BEARISH (Global Sell-Off)</option>
+              <option value="STRONG_BULLISH">STRONG_BULLISH (US Rally +1%+)</option>
+              <option value="MILD_BULLISH">MILD_BULLISH (Positive US Close)</option>
+              <option value="NEUTRAL_MIXED">NEUTRAL_MIXED (Flat / Mixed US)</option>
+              <option value="MILD_BEARISH">MILD_BEARISH (Negative US Close)</option>
+              <option value="STRONG_BEARISH">STRONG_BEARISH (US Sell-Off -1%+)</option>
             </select>
           </div>
           <div>
-            <label style="font-size:11px; color:#fbbf24; font-weight:600; display:block; margin-bottom:3px;">Prev Day Closing PCR</label>
-            <input type="number" step="0.01" id="ppPrevPcr" placeholder="e.g. 1.52 or 1.15 or 0.62" style="width:100%;" />
+            <label style="font-size:11px; color:#22d3ee; font-weight:600; display:block; margin-bottom:3px;">3. Asian Markets (Nikkei 225 &amp; Hang Seng)</label>
+            <select id="ppAsian" style="width:100%;">
+              <option value="POSITIVE_MOMENTUM">POSITIVE_MOMENTUM (Nikkei/HangSeng Green)</option>
+              <option value="NEUTRAL_MIXED">NEUTRAL_MIXED (Mixed / Flat Asia)</option>
+              <option value="NEGATIVE_DRAG">NEGATIVE_DRAG (Nikkei/HangSeng Red)</option>
+            </select>
           </div>
           <div>
-            <label style="font-size:11px; color:#34d399; font-weight:600; display:block; margin-bottom:3px;">India VIX / IV Level</label>
+            <label style="font-size:11px; color:#fbbf24; font-weight:600; display:block; margin-bottom:3px;">4. FII &amp; DII Activity (Prev Session)</label>
+            <select id="ppFii" style="width:100%;">
+              <option value="FII_DII_NET_BUYERS">FII_DII_NET_BUYERS (Both Buying ★)</option>
+              <option value="FII_NET_LONG">FII_NET_LONG (FII Bought Cash/Fut)</option>
+              <option value="FII_SELL_DII_CUSHION">FII_SELL_DII_CUSHION (FII Sold / DII Cushioned)</option>
+              <option value="NEUTRAL_MIXED">NEUTRAL_MIXED (Balanced Flows)</option>
+              <option value="FII_NET_SHORT">FII_NET_SHORT (Heavy FII Selling)</option>
+            </select>
+          </div>
+          <div>
+            <label style="font-size:11px; color:#fbbf24; font-weight:600; display:block; margin-bottom:3px;">5. Crude Oil (Brent Crude — &gt;80% Import)</label>
+            <select id="ppBrent" style="width:100%;">
+              <option value="COOLING_BULLISH">COOLING_BULLISH (Oil Falling &rarr; Bullish India)</option>
+              <option value="STABLE_NEUTRAL">STABLE_NEUTRAL (Range-Bound Oil)</option>
+              <option value="SPIKING_BEARISH">SPIKING_BEARISH (Oil Spiking &rarr; Bearish Inflation)</option>
+            </select>
+          </div>
+          <div>
+            <label style="font-size:11px; color:#fbbf24; font-weight:600; display:block; margin-bottom:3px;">6. Dollar Index (DXY) &amp; USD/INR</label>
+            <select id="ppDxyInr" style="width:100%;">
+              <option value="COOLING_INR_STRONG">COOLING_INR_STRONG (DXY Down / INR Firm)</option>
+              <option value="STABLE_NEUTRAL">STABLE_NEUTRAL (DXY &amp; USD/INR Flat)</option>
+              <option value="RISING_DXY_INR_WEAK">RISING_DXY_INR_WEAK (DXY Up / FII Outflow Risk)</option>
+            </select>
+          </div>
+        </div>
+
+        <!-- Stage 3 Domestic Pre-Market Data & Key Reference Levels -->
+        <div style="font-size:11.5px; font-weight:700; color:#34d399; margin-bottom:6px; text-transform:uppercase;">
+          🇮🇳 Stage 3: Domestic Pre-Market Data (Check 9:00 AM – 9:08 AM IST) &amp; Key Option Chain Walls
+        </div>
+        <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(155px, 1fr)); gap:10px; margin-bottom:14px;">
+          <div>
+            <label style="font-size:11px; color:#34d399; font-weight:600; display:block; margin-bottom:3px;">7a. 09:08 Equilibrium Spot</label>
+            <input type="number" step="0.05" id="ppPreOpen" placeholder="e.g. 24485" style="width:100%;" />
+          </div>
+          <div>
+            <label style="font-size:11px; color:#34d399; font-weight:600; display:block; margin-bottom:3px;">7b. 09:08 Advance-Decline</label>
+            <select id="ppAdvDec" style="width:100%;">
+              <option value="STRONG_ADVANCES_3_1">STRONG_ADVANCES (&gt;3:1 Bullish)</option>
+              <option value="MODERATE_ADVANCES">MODERATE_ADVANCES (Positive Breadth)</option>
+              <option value="BALANCED_1_1">BALANCED_1_1 (~1:1 Mixed)</option>
+              <option value="MODERATE_DECLINES">MODERATE_DECLINES (Negative Breadth)</option>
+              <option value="STRONG_DECLINES_1_3">STRONG_DECLINES (&lt;1:3 Bearish)</option>
+            </select>
+          </div>
+          <div>
+            <label style="font-size:11px; color:#34d399; font-weight:600; display:block; margin-bottom:3px;">8a. India VIX (Volatility)</label>
             <input type="number" step="0.1" id="ppVix" placeholder="14-16 Ideal | >19.5 No-Trade" style="width:100%;" />
           </div>
           <div>
-            <label style="font-size:11px; color:var(--muted); display:block; margin-bottom:3px;">FII Overnight Flow</label>
-            <select id="ppFii" style="width:100%;">
-              <option value="FII_NET_LONG">FII_NET_LONG (Bought Idx Fut/CE)</option>
-              <option value="NEUTRAL_MIXED">NEUTRAL_MIXED (Balanced)</option>
-              <option value="FII_NET_SHORT">FII_NET_SHORT (Shorted Idx Fut/PE)</option>
-            </select>
+            <label style="font-size:11px; color:#fbbf24; font-weight:600; display:block; margin-bottom:3px;">8b. Prev Day Closing PCR</label>
+            <input type="number" step="0.01" id="ppPrevPcr" placeholder="e.g. 1.54 or 1.18" style="width:100%;" />
           </div>
           <div>
             <label style="font-size:11px; color:var(--muted); display:block; margin-bottom:3px;">Session / Event Context</label>
             <select id="ppEvent" style="width:100%;">
-              <option value="NORMAL_DAY">NORMAL_DAY (Standard Session)</option>
-              <option value="WEEKLY_EXPIRY">WEEKLY_EXPIRY (High Gamma/Theta)</option>
-              <option value="PRE_EVENT_HIGH_IV">PRE_EVENT_HIGH_IV (IV Crush Risk!)</option>
+              <option value="NORMAL_DAY">NORMAL_DAY (Standard)</option>
+              <option value="WEEKLY_EXPIRY">WEEKLY_EXPIRY (High Gamma)</option>
+              <option value="PRE_EVENT_HIGH_IV">PRE_EVENT_HIGH_IV (IV Crush!)</option>
             </select>
           </div>
-        </div>
-
-        <!-- Row 2: Key Spot & OI Reference Levels -->
-        <div style="font-size:11.5px; font-weight:700; color:#93c5fd; margin-bottom:6px; text-transform:uppercase;">
-          B. Key Spot &amp; Option Chain Reference Levels (PDH, PDL, PDC, 09:08 Pre-Open, OI Walls)
-        </div>
-        <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap:10px; margin-bottom:14px;">
           <div>
             <label style="font-size:11px; color:var(--muted); display:block; margin-bottom:3px;">Prev Day High (PDH)</label>
             <input type="number" step="0.05" id="ppPdh" placeholder="e.g. 24560" style="width:100%;" />
@@ -1258,22 +1298,18 @@ INDEX_HTML = r"""<!DOCTYPE html>
             <input type="number" step="0.05" id="ppPdc" placeholder="e.g. 24450" style="width:100%;" />
           </div>
           <div>
-            <label style="font-size:11px; color:var(--muted); display:block; margin-bottom:3px;">09:08 Pre-Open Spot</label>
-            <input type="number" step="0.05" id="ppPreOpen" placeholder="e.g. 24485" style="width:100%;" />
-          </div>
-          <div>
-            <label style="font-size:11px; color:var(--muted); display:block; margin-bottom:3px;">Call Wall (CE Resistance)</label>
+            <label style="font-size:11px; color:var(--muted); display:block; margin-bottom:3px;">Call Wall (CE Res)</label>
             <input type="number" step="50" id="ppCallWall" placeholder="e.g. 24600" style="width:100%;" />
           </div>
           <div>
-            <label style="font-size:11px; color:var(--muted); display:block; margin-bottom:3px;">Put Wall (PE Support)</label>
+            <label style="font-size:11px; color:var(--muted); display:block; margin-bottom:3px;">Put Wall (PE Sup)</label>
             <input type="number" step="50" id="ppPutWall" placeholder="e.g. 24400" style="width:100%;" />
           </div>
         </div>
 
         <!-- Row 3: Your Trade Execution Plan & Post-Market Reflection -->
-        <div style="font-size:11.5px; font-weight:700; color:#34d399; margin-bottom:6px; text-transform:uppercase;">
-          C. Your Daily Execution Plan &amp; Post-Market Reflection Notes
+        <div style="font-size:11.5px; font-weight:700; color:#93c5fd; margin-bottom:6px; text-transform:uppercase;">
+          🎯 Your Daily Execution Plan &amp; Post-Market Reflection Notes
         </div>
         <div style="display:grid; grid-template-columns: 1.3fr 0.8fr 0.8fr 0.6fr 1.5fr 1.5fr; gap:10px;">
           <div>
@@ -1298,7 +1334,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
             <input type="number" step="1" min="0" max="10" id="ppMaxTrades" value="2" style="width:100%;" />
           </div>
           <div>
-            <label style="font-size:11px; color:#93c5fd; display:block; margin-bottom:3px;">Morning Pre-Plan Notes (09:05 AM)</label>
+            <label style="font-size:11px; color:#93c5fd; display:block; margin-bottom:3px;">Morning Pre-Plan Notes (09:08 AM)</label>
             <input type="text" id="ppPreNotes" placeholder="e.g. PCR 1.54 high -> watch for PE reversal below VWAP..." style="width:100%;" />
           </div>
           <div>
@@ -1308,10 +1344,10 @@ INDEX_HTML = r"""<!DOCTYPE html>
         </div>
       </div>
 
-      <!-- Step 2: System Pre-Market Signal & Sentiment Diagnosis Card -->
+      <!-- Step 2: System Pre-Market Signal & 8-Point Checklist Evaluation Card -->
       <div class="card" style="margin-bottom:16px; border-color: rgba(16, 185, 129, 0.5);">
         <div class="card-header">
-          <span>🧠 Step 2: System Pre-Market Sentiment Signal &amp; Opening Forecast (Auto-Computed From Your Inputs)</span>
+          <span>🧠 Step 2: Live 8-Point Pre-Market Sentiment Checklist &amp; Opening Signal</span>
           <button type="button" class="btn-green" onclick="savePrePlan(true)">✓ Apply System Suggested Bias to My Plan</button>
         </div>
         <div id="preMarketSignalBox" style="padding:12px 16px; border-radius:8px; background:rgba(15,23,42,0.9); border:1px solid var(--border); margin-bottom:12px;">
@@ -1443,33 +1479,44 @@ INDEX_HTML = r"""<!DOCTYPE html>
 
     async function loadPresetScenario(presetType) {
       autoFillPrePlan();
-      const spot = parseFloat(document.getElementById("ppPreOpen").value || "24500");
       if (presetType === "HIGH_PCR_REVERSAL") {
         document.getElementById("ppGiftGap").value = "40";
         document.getElementById("ppGlobal").value = "NEUTRAL_MIXED";
+        document.getElementById("ppAsian").value = "NEGATIVE_DRAG";
         document.getElementById("ppPrevPcr").value = "1.54";
         document.getElementById("ppVix").value = "15.2";
         document.getElementById("ppFii").value = "FII_NET_SHORT";
+        document.getElementById("ppBrent").value = "SPIKING_BEARISH";
+        document.getElementById("ppDxyInr").value = "RISING_DXY_INR_WEAK";
+        document.getElementById("ppAdvDec").value = "MODERATE_DECLINES";
         document.getElementById("ppEvent").value = "NORMAL_DAY";
         document.getElementById("ppBias").value = "BEARISH_BELOW_TRIGGER";
         document.getElementById("ppPreNotes").value =
-          "Prev Day PCR 1.54 is extreme overbought (>1.45)! Avoid chasing Gap-Up CE; wait for VWAP breakdown to buy ATM PE.";
+          "Prev Day PCR 1.54 is extreme overbought (>1.45) + FII Short + Brent/DXY rising! Avoid chasing Gap-Up CE; wait for VWAP breakdown to buy ATM PE.";
       } else if (presetType === "GOLDILOCKS_BULL") {
         document.getElementById("ppGiftGap").value = "35";
         document.getElementById("ppGlobal").value = "MILD_BULLISH";
+        document.getElementById("ppAsian").value = "POSITIVE_MOMENTUM";
         document.getElementById("ppPrevPcr").value = "1.18";
         document.getElementById("ppVix").value = "14.5";
-        document.getElementById("ppFii").value = "FII_NET_LONG";
+        document.getElementById("ppFii").value = "FII_DII_NET_BUYERS";
+        document.getElementById("ppBrent").value = "COOLING_BULLISH";
+        document.getElementById("ppDxyInr").value = "COOLING_INR_STRONG";
+        document.getElementById("ppAdvDec").value = "STRONG_ADVANCES_3_1";
         document.getElementById("ppEvent").value = "NORMAL_DAY";
         document.getElementById("ppBias").value = "BULLISH_ABOVE_TRIGGER";
         document.getElementById("ppPreNotes").value =
-          "India VIX 14.5 is in 13.5-16.5 Goldilocks Option Buying Zone + Prev PCR 1.18 Bullish -> Buy ATM CE above Bull Trigger.";
+          "8/8 Bullish Pre-Market Cues + India VIX 14.5 in 13.5-16.5 Goldilocks Option Buying Zone -> Buy ATM CE above Bull Trigger.";
       } else if (presetType === "HIGH_IV_NO_TRADE") {
         document.getElementById("ppGiftGap").value = "155";
         document.getElementById("ppGlobal").value = "NEUTRAL_MIXED";
+        document.getElementById("ppAsian").value = "NEUTRAL_MIXED";
         document.getElementById("ppPrevPcr").value = "1.02";
         document.getElementById("ppVix").value = "21.5";
         document.getElementById("ppFii").value = "NEUTRAL_MIXED";
+        document.getElementById("ppBrent").value = "SPIKING_BEARISH";
+        document.getElementById("ppDxyInr").value = "RISING_DXY_INR_WEAK";
+        document.getElementById("ppAdvDec").value = "BALANCED_1_1";
         document.getElementById("ppEvent").value = "PRE_EVENT_HIGH_IV";
         document.getElementById("ppBias").value = "NO_TRADE_CHOP";
         document.getElementById("ppMaxTrades").value = "0";
@@ -1483,9 +1530,13 @@ INDEX_HTML = r"""<!DOCTYPE html>
       if (!plan) return;
       document.getElementById("ppGiftGap").value = plan.gift_nifty_gap !== undefined ? plan.gift_nifty_gap : (plan.gap_pts || 0);
       document.getElementById("ppGlobal").value = plan.global_sentiment || "NEUTRAL_MIXED";
+      document.getElementById("ppAsian").value = plan.asian_markets || "POSITIVE_MOMENTUM";
       document.getElementById("ppPrevPcr").value = plan.prev_day_pcr !== undefined ? plan.prev_day_pcr : 1.0;
       document.getElementById("ppVix").value = plan.india_vix || 14.5;
       document.getElementById("ppFii").value = plan.fii_flow || "NEUTRAL_MIXED";
+      document.getElementById("ppBrent").value = plan.brent_crude || "STABLE_NEUTRAL";
+      document.getElementById("ppDxyInr").value = plan.dxy_usdinr || "STABLE_NEUTRAL";
+      document.getElementById("ppAdvDec").value = plan.preopen_adv_dec || "MODERATE_ADVANCES";
       document.getElementById("ppEvent").value = plan.event_context || "NORMAL_DAY";
       document.getElementById("ppPdh").value = plan.pdh || "";
       document.getElementById("ppPdl").value = plan.pdl || "";
@@ -1505,9 +1556,13 @@ INDEX_HTML = r"""<!DOCTYPE html>
       const payload = {
         gift_nifty_gap: parseFloat(document.getElementById("ppGiftGap").value || "0"),
         global_sentiment: document.getElementById("ppGlobal").value,
+        asian_markets: document.getElementById("ppAsian").value,
         prev_day_pcr: parseFloat(document.getElementById("ppPrevPcr").value || "1.0"),
         india_vix: parseFloat(document.getElementById("ppVix").value || "14.5"),
         fii_flow: document.getElementById("ppFii").value,
+        brent_crude: document.getElementById("ppBrent").value,
+        dxy_usdinr: document.getElementById("ppDxyInr").value,
+        preopen_adv_dec: document.getElementById("ppAdvDec").value,
         event_context: document.getElementById("ppEvent").value,
         pdh: parseFloat(document.getElementById("ppPdh").value || "0"),
         pdl: parseFloat(document.getElementById("ppPdl").value || "0"),
@@ -1816,10 +1871,51 @@ INDEX_HTML = r"""<!DOCTYPE html>
           .map(r => `<li style="margin-top:4px; color:#cbd5e1;">${r}</li>`)
           .join("");
 
+        const chkItems = todayPlan.premarket_checklist || [];
+        const renderStageChecklist = (stageCode) => {
+          return chkItems
+            .filter(item => item.stage === stageCode)
+            .map(item => {
+              let pillCls = "pill-wait";
+              let pillText = item.verdict;
+              if (item.verdict === "BULLISH") {
+                pillCls = "pill-pass";
+                pillText = "BULLISH";
+              } else if (item.verdict === "BEARISH" || item.verdict === "DANGER_NO_TRADE") {
+                pillCls = "q-badge q-SHORT_BUILDUP";
+                pillText = item.verdict === "DANGER_NO_TRADE" ? "NO-TRADE IV" : "BEARISH";
+              } else if (item.verdict === "REVERSAL_WATCH" || item.verdict === "CAUTION_GAP") {
+                pillCls = "q-badge q-LONG_UNWINDING";
+                pillText = item.verdict === "REVERSAL_WATCH" ? "REVERSAL" : "GAP CAUTION";
+              }
+              return `
+                <div class="check-item">
+                  <span class="${pillCls}" style="flex-shrink:0; margin-top:2px;">${pillText}</span>
+                  <div>
+                    <div style="font-weight:700; color:#f8fafc; font-size:12px;">
+                      ${item.title} <span style="color:#22d3ee; font-weight:600;">[${item.value_label || ''}]</span>
+                    </div>
+                    <div style="font-size:11px; color:var(--muted); margin-top:2px;">${item.detail}</div>
+                  </div>
+                </div>
+              `;
+            })
+            .join("");
+        };
+
+        const bullCnt = todayPlan.bull_cues_count !== undefined ? todayPlan.bull_cues_count : 0;
+        const bearCnt = todayPlan.bear_cues_count !== undefined ? todayPlan.bear_cues_count : 0;
+        const neutCnt = todayPlan.neutral_cues_count !== undefined ? todayPlan.neutral_cues_count : 0;
+
         ppSigBox.innerHTML = `
           <div style="display:flex; flex-wrap:wrap; justify-content:space-between; align-items:center; gap:10px; border-bottom:1px solid var(--border); padding-bottom:10px; margin-bottom:10px;">
             <div>
-              <div style="font-size:11px; color:var(--muted); text-transform:uppercase;">Headline Pre-Market Signal (${todayPlan.session_date})</div>
+              <div style="font-size:11px; color:var(--muted); text-transform:uppercase;">
+                Headline Pre-Market Signal (${todayPlan.session_date}) &mdash;
+                <span class="pos-green">Bullish Cues: ${bullCnt}/8</span> |
+                <span class="neg-red">Bearish Cues: ${bearCnt}/8</span> |
+                <span>Neutral: ${neutCnt}/8</span>
+              </div>
               <div style="font-size:16px; font-weight:800; color:#22d3ee; margin-top:2px;">${todayPlan.system_premarket_signal || '--'}</div>
             </div>
             <div style="text-align:right;">
@@ -1827,10 +1923,32 @@ INDEX_HTML = r"""<!DOCTYPE html>
               <div style="font-size:13px; font-weight:700; color:#fbbf24;">${todayPlan.expected_open_type || todayPlan.gap_regime || '--'}</div>
             </div>
           </div>
-          <div style="margin-bottom:8px; font-size:13px; font-weight:700; color:#34d399;">
+          <div style="margin-bottom:12px; font-size:13px; font-weight:700; color:#34d399;">
             ${todayPlan.option_buying_env || todayPlan.vix_regime || '--'}
           </div>
-          <ul style="padding-left:18px; font-size:12px;">
+
+          <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(310px, 1fr)); gap:12px; margin-bottom:10px;">
+            <div class="check-box">
+              <div style="font-weight:700; color:#22d3ee; margin-bottom:6px; font-size:12.5px;">
+                🌍 Global Indicators (6:30 AM – 8:00 AM IST)
+              </div>
+              ${renderStageChecklist("GLOBAL_630_800")}
+            </div>
+            <div class="check-box">
+              <div style="font-weight:700; color:#fbbf24; margin-bottom:6px; font-size:12.5px;">
+                📊 Macroeconomic &amp; Institutional Triggers
+              </div>
+              ${renderStageChecklist("MACRO_INSTITUTIONAL")}
+            </div>
+            <div class="check-box">
+              <div style="font-weight:700; color:#34d399; margin-bottom:6px; font-size:12.5px;">
+                🇮🇳 Domestic Pre-Market Data (9:00 AM – 9:08 AM IST)
+              </div>
+              ${renderStageChecklist("DOMESTIC_900_908")}
+            </div>
+          </div>
+
+          <ul style="padding-left:18px; font-size:11.5px; margin-top:6px;">
             ${reasonsList}
           </ul>
         `;
@@ -1838,8 +1956,9 @@ INDEX_HTML = r"""<!DOCTYPE html>
         ppBox.innerHTML = `
           <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap:12px;">
             <div>
-              <div style="color:#93c5fd; font-weight:700; margin-bottom:3px;">1. Morning Pre-Plan &amp; Sentiment (${todayPlan.session_date})</div>
-              <div><b>GIFT Gap:</b> ${todayPlan.gift_nifty_gap >= 0 ? '+' : ''}${fmtNum(todayPlan.gift_nifty_gap, 0)} pts | <b>Global:</b> ${todayPlan.global_sentiment} | <b>Prev PCR:</b> <b>${fmtNum(todayPlan.prev_day_pcr, 2)}</b></div>
+              <div style="color:#93c5fd; font-weight:700; margin-bottom:3px;">1. Morning Pre-Plan &amp; 8-Point Cues (${todayPlan.session_date})</div>
+              <div><b>GIFT Gap:</b> ${todayPlan.gift_nifty_gap >= 0 ? '+' : ''}${fmtNum(todayPlan.gift_nifty_gap, 0)} pts | <b>US/Asia:</b> ${todayPlan.global_sentiment} / ${todayPlan.asian_markets || 'POS'}</div>
+              <div><b>Macro:</b> ${todayPlan.fii_flow} | Oil: ${todayPlan.brent_crude || 'STABLE'} | DXY: ${todayPlan.dxy_usdinr || 'STABLE'}</div>
               <div><b>Your Planned Bias:</b> <span style="color:#22d3ee; font-weight:700">${todayPlan.planned_bias}</span> | <b>Triggers:</b> Bull &ge; ${fmtNum(todayPlan.bull_trigger, 0)} / Bear &le; ${fmtNum(todayPlan.bear_trigger, 0)}</div>
             </div>
             <div>
@@ -1862,7 +1981,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
 
       if (planHistory.length === 0) {
         document.getElementById("prePlanTableBody").innerHTML =
-          `<tr><td colspan="10" style="text-align:center; color:var(--muted); padding:12px;">No daily pre-plans saved yet. Click "🧠 Generate Signal & Save Plan" above!</td></tr>`;
+          `<tr><td colspan="10" style="text-align:center; color:var(--muted); padding:12px;">No daily pre-plans saved yet. Click "🧠 Evaluate 8-Point Checklist & Save Plan" above!</td></tr>`;
       } else {
         document.getElementById("prePlanTableBody").innerHTML = planHistory.map(p => {
           const st = String(p.plan_match_status || "");
@@ -1873,10 +1992,10 @@ INDEX_HTML = r"""<!DOCTYPE html>
           const pcrColor = pcrVal >= 1.45 ? "#fbbf24" : (pcrVal <= 0.65 ? "#22d3ee" : "#f8fafc");
           return `
             <tr style="${isDev ? 'background:rgba(244,63,94,0.08);' : (isAligned ? 'background:rgba(16,185,129,0.06);' : '')}">
-              <td style="text-align:left; font-weight:700">${p.session_date}</td>
-              <td style="text-align:left">GIFT: <b>${(p.gift_nifty_gap || 0) >= 0 ? '+' : ''}${fmtNum(p.gift_nifty_gap || p.gap_pts, 0)}</b><br/><span style="color:var(--muted); font-size:11px;">${p.global_sentiment || 'NEUTRAL'} | ${p.fii_flow || 'NEUTRAL'}</span></td>
+              <td style="text-align:left; font-weight:700">${p.session_date}<br/><span style="font-size:10px; color:#34d399">Bull:${p.bull_cues_count || 0}/8</span> <span style="font-size:10px; color:#fb7185">Bear:${p.bear_cues_count || 0}/8</span></td>
+              <td style="text-align:left">GIFT: <b>${(p.gift_nifty_gap || 0) >= 0 ? '+' : ''}${fmtNum(p.gift_nifty_gap || p.gap_pts, 0)}</b><br/><span style="color:var(--muted); font-size:11px;">US:${p.global_sentiment || 'NEUTRAL'} | Asia:${p.asian_markets || 'POS'}<br/>FII:${p.fii_flow || 'NEUTRAL'} | Oil:${p.brent_crude || 'STABLE'}</span></td>
               <td style="font-weight:700; color:${pcrColor}">${fmtNum(pcrVal, 2)}<br/><span style="font-size:10px; color:var(--muted)">${pcrVal >= 1.45 ? 'OVERBOUGHT' : (pcrVal <= 0.65 ? 'OVERSOLD' : 'NORMAL')}</span></td>
-              <td style="text-align:left; white-space:normal; max-width:200px;"><b>VIX ${fmtNum(p.india_vix, 1)}</b> (${p.event_context || 'NORMAL'})<br/><span style="font-size:11px; color:var(--muted)">${p.vix_regime}</span></td>
+              <td style="text-align:left; white-space:normal; max-width:200px;"><b>VIX ${fmtNum(p.india_vix, 1)}</b> (${p.event_context || 'NORMAL'})<br/><span style="font-size:11px; color:var(--muted)">9:08 Adv/Dec: ${p.preopen_adv_dec || 'MOD'}</span></td>
               <td style="text-align:left; white-space:normal; max-width:250px; font-weight:600; color:#22d3ee">${p.system_premarket_signal || '--'}</td>
               <td style="text-align:left"><b>${p.planned_bias}</b><br/><span class="pos-green">&ge;${fmtNum(p.bull_trigger, 0)}</span> / <span class="neg-red">&le;${fmtNum(p.bear_trigger, 0)}</span></td>
               <td>O:${fmtNum(p.actual_open, 0)} H:${fmtNum(p.actual_high, 0)}<br/>L:${fmtNum(p.actual_low, 0)} C:${fmtNum(p.actual_close, 0)}</td>
