@@ -248,11 +248,11 @@ class AnalyzerAppState:
         """Fetch latest snapshot from OpenAlgo or advance demo scenario."""
         with self.lock:
             self.last_error = None
-            self.eval_cycle_count += 1
-            self.last_eval_wall_time = dt.datetime.now().strftime("%H:%M:%S")
             self.last_eval_epoch = time.time()
 
             if self.mode == "DEMO":
+                self.eval_cycle_count += 1
+                self.last_eval_wall_time = dt.datetime.now().strftime("%H:%M:%S")
                 if self.last_report is None:
                     ts, c_resp, s_resp = self.demo_scenarios[0]
                     self.demo_step_idx = 0
@@ -292,9 +292,12 @@ class AnalyzerAppState:
 
             # LIVE_OPENALGO mode
             is_open, mkt_reason = check_indian_market_hours()
-            if not is_open and self.last_report is not None and not advance_demo:
-                self.last_error = f"{mkt_reason} — Live auto-polling paused so frozen closing quotes don't dilute your journal."
-                return self._serialize_state(self.live_store)
+            if not is_open and self.last_report is not None:
+                self.last_error = f"{mkt_reason} — Live auto-polling & offline logging paused after 15:30 IST so frozen closing quotes don't dilute your journal."
+                return self._serialize_state(self.live_store, log_to_console=False)
+
+            self.eval_cycle_count += 1
+            self.last_eval_wall_time = dt.datetime.now().strftime("%H:%M:%S")
 
             try:
                 gateway = OpenAlgoGateway(host=self.host, api_key=self.api_key)
@@ -655,7 +658,7 @@ class AnalyzerAppState:
             "offline_log": report.get("eval_log") or {},
         }
 
-    def _serialize_state(self, store: SnapshotStore) -> Dict[str, Any]:
+    def _serialize_state(self, store: SnapshotStore, log_to_console: bool = True) -> Dict[str, Any]:
         cur = store.conn.cursor()
         cur.execute(
             """
@@ -678,7 +681,7 @@ class AnalyzerAppState:
         )
         notifier = WhatsAppNotifier(store)
         eval_trace = self._build_evaluation_trace(self.last_report)
-        if eval_trace.get("status") == "EVALUATED":
+        if log_to_console and eval_trace.get("status") == "EVALUATED":
             ce_eval = eval_trace.get("ce_eval") or {}
             pe_eval = eval_trace.get("pe_eval") or {}
             v_info = eval_trace.get("verdict") or {}
@@ -690,12 +693,15 @@ class AnalyzerAppState:
                 f"Verdict={v_info.get('action')}"
             )
 
+        is_open, mkt_reason = check_indian_market_hours()
         return {
             "mode": self.mode,
             "host": self.host,
             "has_api_key": bool(self.api_key),
             "analyze_mode": self.analyze_mode,
             "underlying": self.underlying,
+            "market_open": is_open,
+            "market_reason": mkt_reason,
             "demo_step": self.demo_step_idx + 1,
             "demo_total_steps": len(self.demo_scenarios),
             "error": self.last_error,
@@ -1620,15 +1626,34 @@ INDEX_HTML = r"""<!DOCTYPE html>
 
     function updateCountdownLabels() {
       const sec = parseInt(document.getElementById("autoRefreshSelect").value, 10);
+      const mode = document.getElementById("modeSelect").value;
       const hb = document.getElementById("engineHeartbeatBadge");
       const cd = document.getElementById("tracerCountdownLabel");
       const cycleNum = (latestReportCache && latestReportCache._cycle_id) || 1;
       const wallTime = (latestReportCache && latestReportCache._wall_time) || "--:--:--";
+      const mktOpen = latestReportCache ? latestReportCache._market_open !== false : true;
+      const mktReason = (latestReportCache && latestReportCache._market_reason) || "Market Closed (After 15:30 IST)";
+
+      if (mode === "LIVE_OPENALGO" && !mktOpen) {
+        if (hb) {
+          hb.className = "badge badge-demo";
+          hb.textContent = `🛑 MARKET CLOSED | Final Cycle #${cycleNum} (${wallTime}) | Live Polling Paused Until 09:15 AM`;
+        }
+        if (cd) cd.textContent = `🛑 ${mktReason} (Switch to Demo Simulator to practice after hours)`;
+        return;
+      }
+
       if (sec > 0) {
-        if (hb) hb.textContent = `🟢 ENGINE ACTIVE | Cycle #${cycleNum} (${wallTime}) | Next Poll: ${countdownRemainingSec}s`;
+        if (hb) {
+          hb.className = "badge badge-sim";
+          hb.textContent = `🟢 ENGINE ACTIVE | Cycle #${cycleNum} (${wallTime}) | Next Poll: ${countdownRemainingSec}s`;
+        }
         if (cd) cd.textContent = `Next Evaluation Cycle in ${countdownRemainingSec}s`;
       } else {
-        if (hb) hb.textContent = `🟡 MANUAL MODE | Cycle #${cycleNum} (${wallTime}) | Auto-Poll OFF`;
+        if (hb) {
+          hb.className = "badge badge-demo";
+          hb.textContent = `🟡 MANUAL MODE | Cycle #${cycleNum} (${wallTime}) | Auto-Poll OFF`;
+        }
         if (cd) cd.textContent = `Auto-Poll OFF (Click Re-Evaluate or Step Demo)`;
       }
     }
@@ -1850,12 +1875,16 @@ INDEX_HTML = r"""<!DOCTYPE html>
       }
       if (sec > 0) {
         countdownTickTimer = setInterval(() => {
+          const mode = document.getElementById("modeSelect").value;
+          const mktOpen = latestReportCache ? latestReportCache._market_open !== false : true;
+          if (mode === "LIVE_OPENALGO" && !mktOpen) {
+            updateCountdownLabels();
+            return;
+          }
           countdownRemainingSec = Math.max(0, countdownRemainingSec - 1);
           updateCountdownLabels();
           if (countdownRemainingSec === 0) {
             countdownRemainingSec = sec;
-            // In LIVE mode, advance=1 is ignored when OpenAlgo is connected (it fetches live quotes),
-            // and in DEMO/Fallback mode, advance=1 steps to the next dynamic 3-minute snapshot!
             refreshData(true);
           }
         }, 1000);
@@ -1867,10 +1896,17 @@ INDEX_HTML = r"""<!DOCTYPE html>
       const container = document.getElementById("logTracerContainer");
       const pill = document.getElementById("tracerStatusPill");
       const clearEach = document.getElementById("chkClearEachCycle").checked;
+      const mode = document.getElementById("modeSelect").value;
+      const mktOpen = latestReportCache ? latestReportCache._market_open !== false : true;
 
       if (pill) {
-        pill.className = "badge badge-sim";
-        pill.textContent = `✓ EVALUATED CYCLE #${trace.cycle_id} @ ${trace.wall_time}`;
+        if (mode === "LIVE_OPENALGO" && !mktOpen) {
+          pill.className = "badge badge-demo";
+          pill.textContent = `🛑 MARKET CLOSED (PAUSED @ CYCLE #${trace.cycle_id})`;
+        } else {
+          pill.className = "badge badge-sim";
+          pill.textContent = `✓ EVALUATED CYCLE #${trace.cycle_id} @ ${trace.wall_time}`;
+        }
       }
 
       const inp = trace.inputs;
@@ -2020,6 +2056,8 @@ INDEX_HTML = r"""<!DOCTYPE html>
       const rep = state.report;
       if (!rep) return;
       latestReportCache = rep;
+      latestReportCache._market_open = state.market_open !== false;
+      latestReportCache._market_reason = state.market_reason || "";
       if (state.eval_trace) {
         latestReportCache._cycle_id = state.eval_trace.cycle_id;
         latestReportCache._wall_time = state.eval_trace.wall_time;
@@ -2577,6 +2615,7 @@ def _background_auto_poller() -> None:
     Background daemon thread that guarantees automatic 3-minute Option Chain evaluation
     and dynamic offline logging (to logs/evaluation_trace_<YYYY-MM-DD>.log, .csv, .jsonl)
     even when no browser tab is open or the browser tab is minimized/throttled.
+    Automatically pauses in LIVE_OPENALGO mode outside NSE market hours (09:15–15:30 IST).
     """
     while True:
         time.sleep(2.0)
@@ -2584,6 +2623,10 @@ def _background_auto_poller() -> None:
             interval = APP_STATE.auto_poll_interval_sec
             if interval <= 0:
                 continue
+            if APP_STATE.mode == "LIVE_OPENALGO" and APP_STATE.last_report is not None:
+                is_open, _ = check_indian_market_hours()
+                if not is_open:
+                    continue
             elapsed = time.time() - APP_STATE.last_eval_epoch
             if elapsed >= interval:
                 APP_STATE.step_or_poll(advance_demo=True)
