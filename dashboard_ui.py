@@ -36,6 +36,7 @@ from option_chain_analyzer import (
     check_indian_market_hours,
     format_whatsapp_setup_message,
     generate_demo_snapshots,
+    log_evaluation_trace_offline,
     save_pre_market_plan,
     update_and_write_setup_journal,
 )
@@ -256,6 +257,7 @@ class AnalyzerAppState:
                     chain_resp=json.loads(json.dumps(c_resp)),
                     synth_resp=json.loads(json.dumps(s_resp)),
                     now_ts=ts,
+                    source_mode=f"DEMO_SIMULATOR (Step 1/{len(self.demo_scenarios)})",
                 )
             elif advance_demo:
                 self.demo_step_idx = (self.demo_step_idx + 1) % len(self.demo_scenarios)
@@ -270,6 +272,12 @@ class AnalyzerAppState:
                     chain_resp=json.loads(json.dumps(c_resp)),
                     synth_resp=json.loads(json.dumps(s_resp)),
                     now_ts=ts,
+                    source_mode=f"DEMO_SIMULATOR (Step {self.demo_step_idx + 1}/{len(self.demo_scenarios)})",
+                )
+            else:
+                self.last_report["eval_log"] = log_evaluation_trace_offline(
+                    self.last_report,
+                    source_mode=f"DEMO_SIMULATOR_RE_EVAL (Step {self.demo_step_idx + 1}/{len(self.demo_scenarios)})",
                 )
             self._update_open_paper_trades(self.demo_store, self.last_report)
             self._check_auto_whatsapp(self.demo_store, self.last_report)
@@ -309,6 +317,7 @@ class AnalyzerAppState:
                 days_to_expiry=days_to_expiry,
                 chain_resp=chain_resp,
                 synth_resp=synth_resp,
+                source_mode=f"LIVE_OPENALGO ({self.host})",
             )
             self._update_open_paper_trades(self.live_store, self.last_report)
             self._check_auto_whatsapp(self.live_store, self.last_report)
@@ -326,6 +335,7 @@ class AnalyzerAppState:
                     chain_resp=json.loads(json.dumps(c_resp)),
                     synth_resp=json.loads(json.dumps(s_resp)),
                     now_ts=ts,
+                    source_mode="FALLBACK_DEMO_SIMULATOR",
                 )
         return self._serialize_state(self.get_active_store())
 
@@ -629,6 +639,7 @@ class AnalyzerAppState:
                 "action": action,
                 "journal_note": journal_note,
             },
+            "offline_log": report.get("eval_log") or {},
         }
 
     def _serialize_state(self, store: SnapshotStore) -> Dict[str, Any]:
@@ -1143,12 +1154,14 @@ INDEX_HTML = r"""<!DOCTYPE html>
             <span id="tracerStatusPill" class="badge badge-sim">ANALYSING...</span>
             <span id="tracerCountdownLabel" style="font-size:11.5px; color:var(--muted); font-variant-numeric:tabular-nums;">Next Poll: --</span>
           </div>
-          <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap; font-size:12px;">
+          <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap; font-size:12px;">
             <label style="display:flex; align-items:center; gap:5px; cursor:pointer; color:#cbd5e1; font-weight:500;">
               <input type="checkbox" id="chkClearEachCycle" checked />
               Clear Log on Each Evaluation Cycle
             </label>
             <button type="button" onclick="clearLogTracer()">🧹 Clear Log</button>
+            <button type="button" onclick="window.open('/api/download_eval_log?format=log', '_blank')" title="Download persistent human-readable evaluation trace (.log) for offline analysis">📥 Offline Log (.log)</button>
+            <button type="button" onclick="window.open('/api/download_eval_log?format=csv', '_blank')" title="Download tabular evaluation log (.csv) for Excel / Pandas offline analysis">📊 Offline CSV (.csv)</button>
             <button type="button" class="btn-amber" onclick="refreshData(true)">▶ Step Next Demo Snapshot</button>
             <button type="button" class="btn-primary" onclick="refreshData(false)">↻ Re-Evaluate Option Chain Now</button>
           </div>
@@ -1859,6 +1872,11 @@ INDEX_HTML = r"""<!DOCTYPE html>
         `).join("");
       };
 
+      const off = trace.offline_log || {};
+      const offLineStr = off.daily_log_path
+        ? `💾 Offline Logger Saved: <code>${off.daily_log_path}</code> | <code>${off.daily_csv_path}</code> | <code>${off.daily_jsonl_path}</code>`
+        : "";
+
       const cycleHtml = `
         <div style="border:1px solid rgba(51,65,85,0.9); border-radius:8px; padding:10px 12px; margin-bottom:10px; background:rgba(15,23,42,0.92);">
           <div style="display:flex; justify-content:space-between; flex-wrap:wrap; border-bottom:1px dashed rgba(148,163,184,0.25); padding-bottom:6px; margin-bottom:8px;">
@@ -1907,6 +1925,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
             <span><b style="color:#22d3ee;">[STEP 5 — FINAL ENGINE VERDICT]:</b> <b style="color:#f8fafc;">${vd.action}</b></span>
             <span style="color:#fbbf24;">📓 ${vd.journal_note}</span>
           </div>
+          ${offLineStr ? `<div style="margin-top:4px; font-size:11px; color:#94a3b8;">${offLineStr}</div>` : ""}
         </div>
       `;
 
@@ -2415,6 +2434,42 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             advance = qs.get("advance", ["0"])[0] == "1"
             state = APP_STATE.step_or_poll(advance_demo=advance)
             self._send_json(state)
+            return
+
+        if parsed.path == "/api/download_eval_log":
+            qs = urllib.parse.parse_qs(parsed.query)
+            fmt = qs.get("format", ["log"])[0].lower()
+            logs_dir = BASE_DIR / "logs"
+            session_date = (
+                str((APP_STATE.last_report or {}).get("session_date") or dt.date.today().isoformat())
+            )
+            if fmt == "csv":
+                target = logs_dir / f"evaluation_trace_{session_date}.csv"
+                if not target.exists():
+                    target = logs_dir / "evaluation_trace_all.csv"
+                content_type = "text/csv; charset=utf-8"
+                disp = f'attachment; filename="evaluation_trace_{session_date}.csv"'
+            elif fmt == "jsonl":
+                target = logs_dir / f"evaluation_trace_{session_date}.jsonl"
+                content_type = "application/x-ndjson; charset=utf-8"
+                disp = f'attachment; filename="evaluation_trace_{session_date}.jsonl"'
+            else:
+                target = logs_dir / f"evaluation_trace_{session_date}.log"
+                if not target.exists():
+                    target = logs_dir / "LATEST_EVALUATION_TRACE.log"
+                content_type = "text/plain; charset=utf-8"
+                disp = f'inline; filename="evaluation_trace_{session_date}.log"'
+
+            if target.exists():
+                body = target.read_bytes()
+                self.send_response(200)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Disposition", disp)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            else:
+                self._send_json({"error": f"Offline evaluation log not found yet at {target}"}, status=404)
             return
 
         self._send_json({"error": "Not found"}, status=404)

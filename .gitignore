@@ -9,6 +9,11 @@ data/*.db-journal
 data/*.db-wal
 data/*.sqlite
 
+# Offline Evaluation Trace Logs
+logs/*.log
+logs/*.csv
+logs/*.jsonl
+
 # Python Bytecode & Virtual Environments
 __pycache__/
 *.py[cod]

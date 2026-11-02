@@ -22,6 +22,7 @@ import csv
 import datetime as dt
 from email.message import EmailMessage
 import json
+import logging
 import math
 import os
 import smtplib
@@ -653,6 +654,7 @@ def analyze_option_chain(
     chain_resp: Dict[str, Any],
     synth_resp: Optional[Dict[str, Any]],
     now_ts: Optional[int] = None,
+    source_mode: str = "ANALYZER",
 ) -> Dict[str, Any]:
     """Run full 4-Pillar Option Chain analysis & evaluate the 6-Point Gamma Blast Checklist."""
     ts = now_ts or int(time.time())
@@ -820,7 +822,261 @@ def analyze_option_chain(
         "signals": signals,
     }
     report["journal"] = update_and_write_setup_journal(store, report, min_score=3)
+    report["eval_log"] = log_evaluation_trace_offline(report, source_mode=source_mode)
     return report
+
+
+_EVAL_TRACE_COUNTER = 0
+_EVAL_LOGGER_CACHE: Dict[str, logging.Logger] = {}
+
+
+def _get_daily_eval_logger(log_path: Path) -> logging.Logger:
+    """Return a configured Python FileHandler logger writing to logs/evaluation_trace_<date>.log."""
+    key = str(log_path.resolve())
+    if key in _EVAL_LOGGER_CACHE:
+        return _EVAL_LOGGER_CACHE[key]
+    logger = logging.getLogger(f"learnot.eval_trace.{log_path.stem}")
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+    if not logger.handlers:
+        fh = logging.FileHandler(log_path, mode="a", encoding="utf-8")
+        fh.setFormatter(logging.Formatter("%(message)s"))
+        logger.addHandler(fh)
+    _EVAL_LOGGER_CACHE[key] = logger
+    return logger
+
+
+def log_evaluation_trace_offline(
+    report: Dict[str, Any],
+    source_mode: str = "ANALYZER",
+) -> Dict[str, Any]:
+    """
+    Persist every Option Chain evaluation cycle to offline files under logs/:
+      1. logs/evaluation_trace_<YYYY-MM-DD>.log & logs/LATEST_EVALUATION_TRACE.log (Human-readable step-by-step trace)
+      2. logs/evaluation_trace_<YYYY-MM-DD>.csv & logs/evaluation_trace_all.csv (Tabular CSV for Excel/Pandas backtesting)
+      3. logs/evaluation_trace_<YYYY-MM-DD>.jsonl (Structured JSON Lines for programmatic offline analysis)
+    Logs:
+      - Exact raw inputs considered (Spot, VWAP, Synthetic Future, Basis, Straddle, PCR, 15m dOI, OI Walls, ATM CE/PE contract metrics)
+      - Bullish ATM CE Conditions Met vs Missing Conditions (with exact numeric readings)
+      - Bearish ATM PE Conditions Met vs Missing Conditions (with exact numeric readings)
+      - Final Engine Verdict & Setup Journal status
+    """
+    global _EVAL_TRACE_COUNTER
+    _EVAL_TRACE_COUNTER += 1
+
+    logs_dir = BASE_DIR / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+
+    session_date = str(report.get("session_date") or dt.date.today().isoformat())
+    now_ist_str = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    snap_ts = int(report.get("ts") or time.time())
+    snap_time_str = dt.datetime.fromtimestamp(snap_ts).strftime("%H:%M:%S")
+
+    underlying = str(report.get("underlying") or "NIFTY")
+    expiry_date = str(report.get("expiry_date") or "")
+    dte = int(report.get("days_to_expiry") or 0)
+    snapshots_count = int(report.get("snapshots_count") or 1)
+
+    spot_ltp = float(report.get("spot_ltp") or 0.0)
+    spot_vwap = float(report.get("spot_vwap") or 0.0)
+    spot_diff = round(spot_ltp - spot_vwap, 2)
+    synth_fut = report.get("synthetic_future")
+    basis = float(report.get("basis") or 0.0)
+
+    atm_strike = float(report.get("atm_strike") or 0.0)
+    atm_straddle_ltp = float(report.get("atm_straddle_ltp") or 0.0)
+    opening_straddle = float(report.get("opening_straddle") or 0.0)
+    straddle_change_pct = float(report.get("straddle_change_pct") or 0.0)
+
+    overall_pcr = float(report.get("overall_pcr") or 0.0)
+    near_pe_doi_15m = int(report.get("near_pe_doi_15m") or 0)
+    near_ce_doi_15m = int(report.get("near_ce_doi_15m") or 0)
+    support_strike = int(float(report.get("support_strike") or 0))
+    resistance_strike = int(float(report.get("resistance_strike") or 0))
+
+    atm_ce: Dict[str, Any] = {}
+    atm_pe: Dict[str, Any] = {}
+    for row in report.get("strikes", []):
+        if abs(float(row.get("strike") or 0.0) - atm_strike) < 0.01:
+            atm_ce = row.get("ce") or {}
+            atm_pe = row.get("pe") or {}
+            break
+
+    ce_ltp = float(atm_ce.get("ltp") or 0.0)
+    ce_vwap = float(atm_ce.get("vwap") or 0.0)
+    ce_theta_bleed = round((abs(float(atm_ce.get("theta") or 0.0)) / max(ce_ltp, 1.0)) * 100.0, 1)
+
+    pe_ltp = float(atm_pe.get("ltp") or 0.0)
+    pe_vwap = float(atm_pe.get("vwap") or 0.0)
+    pe_theta_bleed = round((abs(float(atm_pe.get("theta") or 0.0)) / max(pe_ltp, 1.0)) * 100.0, 1)
+
+    sig = report.get("signals") or {}
+    ce_score = int(sig.get("ce_score") or 0)
+    pe_score = int(sig.get("pe_score") or 0)
+    action = str(sig.get("action") or "WAIT")
+    theta_trap = bool(sig.get("theta_trap"))
+
+    ce_checks = sig.get("ce_checks") or []
+    pe_checks = sig.get("pe_checks") or []
+
+    ce_met_lines = [f"{c[0]} [{c[2]}]" for c in ce_checks if c[1]]
+    ce_miss_lines = [f"{c[0]} [{c[2]}]" for c in ce_checks if not c[1]]
+    pe_met_lines = [f"{c[0]} [{c[2]}]" for c in pe_checks if c[1]]
+    pe_miss_lines = [f"{c[0]} [{c[2]}]" for c in pe_checks if not c[1]]
+
+    synth_str = f"{float(synth_fut):.2f}" if synth_fut is not None else "N/A"
+    journal_status = (
+        f"Logged to Setup Journal (CE {ce_score}/6, PE {pe_score}/6 >= 3/6) -> doc/TRADING_JOURNAL.md"
+        if (ce_score >= 3 or pe_score >= 3)
+        else f"Below 3/6 Journal threshold (CE {ce_score}/6, PE {pe_score}/6) — Logged in Offline Evaluation Trace"
+    )
+
+    # 1. Build human-readable log entry
+    log_lines = [
+        "=" * 108,
+        f"[EVAL CYCLE #{_EVAL_TRACE_COUNTER} | Logged: {now_ist_str} IST | Snapshot Time: {snap_time_str} | Source: {source_mode}]",
+        f"Underlying: {underlying} | Expiry: {expiry_date} (DTE: {dte}) | Session Date: {session_date} | Session Snapshots: #{snapshots_count}",
+        "-" * 108,
+        "[STEP 1: RAW INPUTS CONSIDERED FOR EVALUATION]",
+        f"  • Spot & Carry     : Spot LTP {spot_ltp:,.2f} vs Session VWAP {spot_vwap:,.2f} (Diff: {spot_diff:+.2f}) | Synthetic Future: {synth_str} (Basis: {basis:+.2f})",
+        f"  • Straddle & Vol   : ATM {int(atm_strike)} Straddle ₹{atm_straddle_ltp:,.2f} vs Opening Straddle ₹{opening_straddle:,.2f} ({straddle_change_pct:+.2f}%)",
+        f"  • PCR & 15m dOI    : Near-ATM PCR {overall_pcr:.2f} | 15m PE dOI {near_pe_doi_15m:+,} vs 15m CE dOI {near_ce_doi_15m:+,} | OI Walls: {support_strike} PE (Sup) / {resistance_strike} CE (Res)",
+        (
+            f"  • ATM CE Contract  : {atm_ce.get('symbol', 'ATM_CE')} | LTP ₹{ce_ltp:.2f} vs Option VWAP ₹{ce_vwap:.2f} "
+            f"(3m dLTP {float(atm_ce.get('dltp_3m') or 0):+.2f}) | Quadrant: {atm_ce.get('quadrant', 'NEUTRAL')} "
+            f"(3m dOI {int(atm_ce.get('doi_3m') or 0):+,}) | Vol Burst: {float(atm_ce.get('vol_burst_ratio') or 0):.2f}x "
+            f"(BidQty {int(atm_ce.get('bid_qty') or 0)} vs AskQty {int(atm_ce.get('ask_qty') or 0)}) | "
+            f"IV: {float(atm_ce.get('implied_volatility') or 0):.2f}% (3m dIV {float(atm_ce.get('div_3m') or 0):+.2f}%) | "
+            f"Delta: {float(atm_ce.get('delta') or 0):+.2f} | Daily Theta Bleed: {ce_theta_bleed:.1f}%"
+        ),
+        (
+            f"  • ATM PE Contract  : {atm_pe.get('symbol', 'ATM_PE')} | LTP ₹{pe_ltp:.2f} vs Option VWAP ₹{pe_vwap:.2f} "
+            f"(3m dLTP {float(atm_pe.get('dltp_3m') or 0):+.2f}) | Quadrant: {atm_pe.get('quadrant', 'NEUTRAL')} "
+            f"(3m dOI {int(atm_pe.get('doi_3m') or 0):+,}) | Vol Burst: {float(atm_pe.get('vol_burst_ratio') or 0):.2f}x "
+            f"(BidQty {int(atm_pe.get('bid_qty') or 0)} vs AskQty {int(atm_pe.get('ask_qty') or 0)}) | "
+            f"IV: {float(atm_pe.get('implied_volatility') or 0):.2f}% (3m dIV {float(atm_pe.get('div_3m') or 0):+.2f}%) | "
+            f"|Delta|: {abs(float(atm_pe.get('delta') or 0)):.2f} | Daily Theta Bleed: {pe_theta_bleed:.1f}%"
+        ),
+        "-" * 108,
+        f"[STEP 2: BULLISH ATM CE EVALUATION ({atm_ce.get('symbol', 'ATM_CE')}) — Score: {ce_score}/6]",
+        f"  ✅ CONDITIONS MET ({len(ce_met_lines)}):",
+    ]
+    if ce_met_lines:
+        for line in ce_met_lines:
+            log_lines.append(f"     + {line}")
+    else:
+        log_lines.append("     (None)")
+    log_lines.append(f"  ❌ MISSING CONDITIONS ({len(ce_miss_lines)} — Blocking 6/6 BUY_ATM_CE Trigger):")
+    if ce_miss_lines:
+        for line in ce_miss_lines:
+            log_lines.append(f"     - {line}")
+    else:
+        log_lines.append("     (None — All 6 Bullish CE Conditions Met!)")
+
+    log_lines.extend([
+        "-" * 108,
+        f"[STEP 3: BEARISH ATM PE EVALUATION ({atm_pe.get('symbol', 'ATM_PE')}) — Score: {pe_score}/6]",
+        f"  ✅ CONDITIONS MET ({len(pe_met_lines)}):",
+    ])
+    if pe_met_lines:
+        for line in pe_met_lines:
+            log_lines.append(f"     + {line}")
+    else:
+        log_lines.append("     (None)")
+    log_lines.append(f"  ❌ MISSING CONDITIONS ({len(pe_miss_lines)} — Blocking 6/6 BUY_ATM_PE Trigger):")
+    if pe_miss_lines:
+        for line in pe_miss_lines:
+            log_lines.append(f"     - {line}")
+    else:
+        log_lines.append("     (None — All 6 Bearish PE Conditions Met!)")
+
+    log_lines.extend([
+        "-" * 108,
+        "[STEP 4: FINAL ENGINE VERDICT & OFFLINE AUDIT]",
+        f"  • Engine Verdict : {action}{' (THETA TRAP DETECTED!)' if theta_trap else ''}",
+        f"  • Journal Status : {journal_status}",
+        "=" * 108,
+        "",
+    ])
+    log_block = "\n".join(log_lines)
+
+    daily_log_path = logs_dir / f"evaluation_trace_{session_date}.log"
+    latest_log_path = logs_dir / "LATEST_EVALUATION_TRACE.log"
+    daily_csv_path = logs_dir / f"evaluation_trace_{session_date}.csv"
+    all_csv_path = logs_dir / "evaluation_trace_all.csv"
+    daily_jsonl_path = logs_dir / f"evaluation_trace_{session_date}.jsonl"
+
+    logger = _get_daily_eval_logger(daily_log_path)
+    logger.info(log_block)
+    for handler in logger.handlers:
+        handler.flush()
+
+    # Keep LATEST_EVALUATION_TRACE.log synced with today's log file for quick tailing/inspection
+    try:
+        if daily_log_path.exists():
+            latest_log_path.write_text(daily_log_path.read_text(encoding="utf-8"), encoding="utf-8")
+    except Exception:
+        pass
+
+    # 2. Write structured CSV row for Excel / Pandas offline analysis
+    csv_headers = [
+        "cycle_id", "logged_at_ist", "snapshot_time", "session_date", "source_mode",
+        "underlying", "expiry_date", "dte", "snapshots_count",
+        "spot_ltp", "spot_vwap", "spot_minus_vwap", "synthetic_future", "basis",
+        "atm_strike", "atm_straddle_ltp", "opening_straddle", "straddle_change_pct",
+        "overall_pcr", "near_pe_doi_15m", "near_ce_doi_15m", "support_strike", "resistance_strike",
+        "ce_symbol", "ce_ltp", "ce_vwap", "ce_dltp_3m", "ce_quadrant", "ce_doi_3m",
+        "ce_vol_burst_ratio", "ce_bid_qty", "ce_ask_qty", "ce_iv", "ce_div_3m", "ce_delta", "ce_theta_bleed_pct",
+        "ce_score", "ce_conditions_met", "ce_missing_conditions",
+        "pe_symbol", "pe_ltp", "pe_vwap", "pe_dltp_3m", "pe_quadrant", "pe_doi_3m",
+        "pe_vol_burst_ratio", "pe_bid_qty", "pe_ask_qty", "pe_iv", "pe_div_3m", "pe_delta", "pe_theta_bleed_pct",
+        "pe_score", "pe_conditions_met", "pe_missing_conditions",
+        "verdict_action", "theta_trap",
+    ]
+    csv_row = [
+        _EVAL_TRACE_COUNTER, now_ist_str, snap_time_str, session_date, source_mode,
+        underlying, expiry_date, dte, snapshots_count,
+        round(spot_ltp, 2), round(spot_vwap, 2), spot_diff,
+        round(float(synth_fut), 2) if synth_fut is not None else "", round(basis, 2),
+        int(atm_strike), round(atm_straddle_ltp, 2), round(opening_straddle, 2), round(straddle_change_pct, 2),
+        round(overall_pcr, 2), near_pe_doi_15m, near_ce_doi_15m, support_strike, resistance_strike,
+        atm_ce.get("symbol", ""), round(ce_ltp, 2), round(ce_vwap, 2), round(float(atm_ce.get("dltp_3m") or 0.0), 2),
+        atm_ce.get("quadrant", "NEUTRAL"), int(atm_ce.get("doi_3m") or 0),
+        round(float(atm_ce.get("vol_burst_ratio") or 0.0), 2), int(atm_ce.get("bid_qty") or 0), int(atm_ce.get("ask_qty") or 0),
+        round(float(atm_ce.get("implied_volatility") or 0.0), 2), round(float(atm_ce.get("div_3m") or 0.0), 2),
+        round(float(atm_ce.get("delta") or 0.0), 2), ce_theta_bleed,
+        ce_score, " ;; ".join(ce_met_lines) if ce_met_lines else "NONE", " ;; ".join(ce_miss_lines) if ce_miss_lines else "NONE",
+        atm_pe.get("symbol", ""), round(pe_ltp, 2), round(pe_vwap, 2), round(float(atm_pe.get("dltp_3m") or 0.0), 2),
+        atm_pe.get("quadrant", "NEUTRAL"), int(atm_pe.get("doi_3m") or 0),
+        round(float(atm_pe.get("vol_burst_ratio") or 0.0), 2), int(atm_pe.get("bid_qty") or 0), int(atm_pe.get("ask_qty") or 0),
+        round(float(atm_pe.get("implied_volatility") or 0.0), 2), round(float(atm_pe.get("div_3m") or 0.0), 2),
+        round(abs(float(atm_pe.get("delta") or 0.0)), 2), pe_theta_bleed,
+        pe_score, " ;; ".join(pe_met_lines) if pe_met_lines else "NONE", " ;; ".join(pe_miss_lines) if pe_miss_lines else "NONE",
+        action, theta_trap,
+    ]
+
+    for csv_target in (daily_csv_path, all_csv_path):
+        write_hdr = not csv_target.exists() or csv_target.stat().st_size == 0
+        with csv_target.open("a", newline="", encoding="utf-8") as f_csv:
+            writer = csv.writer(f_csv)
+            if write_hdr:
+                writer.writerow(csv_headers)
+            writer.writerow(csv_row)
+
+    # 3. Write structured JSONL record for programmatic offline scripts
+    jsonl_record = dict(zip(csv_headers, csv_row))
+    with daily_jsonl_path.open("a", encoding="utf-8") as f_jsonl:
+        f_jsonl.write(json.dumps(jsonl_record, ensure_ascii=False) + "\n")
+
+    return {
+        "cycle_id": _EVAL_TRACE_COUNTER,
+        "logged_at_ist": now_ist_str,
+        "daily_log_path": str(daily_log_path.relative_to(BASE_DIR)),
+        "latest_log_path": str(latest_log_path.relative_to(BASE_DIR)),
+        "daily_csv_path": str(daily_csv_path.relative_to(BASE_DIR)),
+        "all_csv_path": str(all_csv_path.relative_to(BASE_DIR)),
+        "daily_jsonl_path": str(daily_jsonl_path.relative_to(BASE_DIR)),
+    }
 
 
 def evaluate_checklist(
