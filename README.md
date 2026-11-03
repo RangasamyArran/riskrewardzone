@@ -47,6 +47,10 @@ flowchart LR
      * **📈 Forward Outcome Tracking:** Tracks how high the option moved *after* the signal (`Max LTP After` & `Max Gain %`) and flags **`MISSED WINNER`** vs. **`FILTER SAVED LOSS`** so you know which rule threshold to fine-tune.
 6. **Zero-Dependency Web UI Trading Desk (`dashboard_ui.py`)**
    * Runs at **`http://127.0.0.1:8080`** with Live Option Chain, 6-Point Scorecards, OI Wall Bars, Gmail Alert Preview, Setup Journal Table, and Practice Trade Log with automatic **15-Minute Anti-Theta Time-Stop** tracking.
+7. **Auto-Reconnect Resilience (Zero-Manual Recovery on Power / Network Outage)**
+   * Built-in connection health-checking engine with automatic state recovery:
+     * When power or network drops in `LIVE_OPENALGO` mode, the background daemon automatically engages an aggressive **10-second probing loop** checking OpenAlgo health while preserving the last valid live market state (never corrupting your logs or UI with fake demo data).
+     * The instant power returns and OpenAlgo starts up, the background engine detects it within 10 seconds, immediately turns green, fetches fresh option chains, and seamlessly resumes live streaming without requiring any manual browser refresh or dropdown toggling.
 
 ---
 

@@ -76,6 +76,13 @@ class AnalyzerAppState:
         self.last_eval_epoch: float = 0.0
         self.auto_poll_interval_sec: int = 180
 
+        # Auto-reconnect resilience attributes
+        self.live_connected: bool = True
+        self.is_reconnecting: bool = False
+        self.reconnect_attempts: int = 0
+        self.reconnect_interval_sec: int = 10
+        self.last_disconnect_time: Optional[float] = None
+
         self._reset_demo(self.underlying)
 
     def _reset_demo(self, underlying: str) -> None:
@@ -331,28 +338,31 @@ class AnalyzerAppState:
                 )
                 self._update_open_paper_trades(self.live_store, self.last_report)
                 self._check_auto_whatsapp(self.live_store, self.last_report)
+                if not self.live_connected and self.reconnect_attempts > 0:
+                    print(
+                        f"  [RECONNECTED] OpenAlgo connection re-established after "
+                        f"{self.reconnect_attempts} attempts! Live data stream resumed."
+                    )
+                self.live_connected = True
+                self.is_reconnecting = False
+                self.reconnect_attempts = 0
+                self.last_disconnect_time = None
                 if not is_open:
                     self.last_error = f"{mkt_reason} — Loaded closing snapshot once; 3m auto-polling paused until 09:15 AM."
             except Exception as exc:
-                self.last_error = str(exc)
-                if self.last_report is None:
-                    self.demo_step_idx = 0
-                elif advance_demo:
-                    self.demo_step_idx = (self.demo_step_idx + 1) % len(self.demo_scenarios)
-                    if self.demo_step_idx == 0:
-                        self._reset_demo(self.underlying)
-                ts, c_resp, s_resp = self.demo_scenarios[self.demo_step_idx]
-                self.last_report = analyze_option_chain(
-                    store=self.demo_store,
-                    underlying=self.underlying,
-                    expiry_date=c_resp["expiry_date"],
-                    days_to_expiry=4,
-                    chain_resp=json.loads(json.dumps(c_resp)),
-                    synth_resp=json.loads(json.dumps(s_resp)),
-                    now_ts=ts,
-                    source_mode=f"FALLBACK_DEMO_SIMULATOR (Step {self.demo_step_idx + 1}/{len(self.demo_scenarios)} — OpenAlgo Offline)",
+                self.live_connected = False
+                self.is_reconnecting = True
+                self.reconnect_attempts += 1
+                if self.last_disconnect_time is None:
+                    self.last_disconnect_time = time.time()
+                down_sec = int(time.time() - self.last_disconnect_time)
+                down_str = f"{down_sec // 60}m {down_sec % 60}s" if down_sec >= 60 else f"{down_sec}s"
+                self.last_error = (
+                    f"OpenAlgo connection lost ({exc}). Power/Network may be down. "
+                    f"Auto-reconnecting every {self.reconnect_interval_sec}s (Attempt #{self.reconnect_attempts}, offline {down_str}). "
+                    f"Trading desk will instantly resume the moment OpenAlgo and power return."
                 )
-                self._update_open_paper_trades(self.demo_store, self.last_report)
+                print(f"  [CONNECTION DROP] {self.last_error}")
             return self._serialize_state(self.get_active_store())
 
     def _check_auto_whatsapp(
@@ -702,6 +712,10 @@ class AnalyzerAppState:
             "underlying": self.underlying,
             "market_open": is_open,
             "market_reason": mkt_reason,
+            "live_connected": self.live_connected,
+            "is_reconnecting": self.is_reconnecting,
+            "reconnect_attempts": self.reconnect_attempts,
+            "reconnect_interval_sec": self.reconnect_interval_sec,
             "demo_step": self.demo_step_idx + 1,
             "demo_total_steps": len(self.demo_scenarios),
             "error": self.last_error,
@@ -792,6 +806,16 @@ INDEX_HTML = r"""<!DOCTYPE html>
     .badge-sim { background: var(--cyan-bg); color: #22d3ee; border: 1px solid rgba(34,211,238,0.35); }
     .badge-live { background: var(--red-bg); color: #fb7185; border: 1px solid rgba(251,113,133,0.35); }
     .badge-demo { background: var(--amber-bg); color: #fbbf24; border: 1px solid rgba(251,191,36,0.35); }
+    @keyframes pulse-amber {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.6; transform: scale(0.98); }
+    }
+    .badge-reconnect {
+      background: rgba(245, 158, 11, 0.22);
+      color: #fbbf24;
+      border: 1px solid #f59e0b;
+      animation: pulse-amber 1.8s infinite ease-in-out;
+    }
 
     .controls {
       display: flex;
@@ -1634,6 +1658,17 @@ INDEX_HTML = r"""<!DOCTYPE html>
       const mktOpen = latestReportCache ? latestReportCache._market_open !== false : true;
       const mktReason = (latestReportCache && latestReportCache._market_reason) || "Market Closed (After 15:30 IST)";
 
+      const isReconnecting = latestReportCache && mode === "LIVE_OPENALGO" && latestReportCache._live_connected === false;
+      if (isReconnecting) {
+        const attempts = (latestReportCache && latestReportCache._reconnect_attempts) || 1;
+        if (hb) {
+          hb.className = "badge badge-reconnect";
+          hb.textContent = `🟡 AUTO-RECONNECTING | Attempt #${attempts} | Next Probe: ${countdownRemainingSec}s`;
+        }
+        if (cd) cd.textContent = `⚡ OpenAlgo Offline (Power/Network Drop) — Probing http://127.0.0.1:5000 every 10s (Next in ${countdownRemainingSec}s)`;
+        return;
+      }
+
       if (mode === "LIVE_OPENALGO" && !mktOpen) {
         if (hb) {
           hb.className = "badge badge-demo";
@@ -1660,13 +1695,21 @@ INDEX_HTML = r"""<!DOCTYPE html>
 
     async function refreshData(advanceDemo = false) {
       const pill = document.getElementById("tracerStatusPill");
+      const mode = document.getElementById("modeSelect").value;
+      const isLive = mode === "LIVE_OPENALGO";
       if (pill) {
         pill.className = "badge badge-demo";
-        pill.textContent = "⚡ ANALYSING OPTION CHAIN...";
+        pill.textContent = isLive ? "⚡ PROBING LIVE OPENALGO..." : "⚡ ANALYSING OPTION CHAIN...";
       }
       const sec = parseInt(document.getElementById("autoRefreshSelect").value, 10);
-      if (sec > 0) countdownRemainingSec = sec;
-      const data = await apiCall("/api/state?advance=" + (advanceDemo ? "1" : "0"));
+      const isDisconnected = latestReportCache && isLive && latestReportCache._live_connected === false;
+      if (isDisconnected) {
+        countdownRemainingSec = (latestReportCache && latestReportCache._reconnect_interval_sec) || 10;
+      } else if (sec > 0) {
+        countdownRemainingSec = sec;
+      }
+      const shouldAdvance = !isLive && advanceDemo;
+      const data = await apiCall("/api/state?advance=" + (shouldAdvance ? "1" : "0"));
       renderState(data);
     }
 
@@ -1876,16 +1919,22 @@ INDEX_HTML = r"""<!DOCTYPE html>
       if (sec > 0) {
         countdownTickTimer = setInterval(() => {
           const mode = document.getElementById("modeSelect").value;
+          const isDisconnected = latestReportCache && mode === "LIVE_OPENALGO" && latestReportCache._live_connected === false;
           const mktOpen = latestReportCache ? latestReportCache._market_open !== false : true;
-          if (mode === "LIVE_OPENALGO" && !mktOpen) {
+          if (mode === "LIVE_OPENALGO" && !mktOpen && !isDisconnected) {
             updateCountdownLabels();
             return;
           }
           countdownRemainingSec = Math.max(0, countdownRemainingSec - 1);
           updateCountdownLabels();
           if (countdownRemainingSec === 0) {
-            countdownRemainingSec = sec;
-            refreshData(true);
+            if (isDisconnected) {
+              countdownRemainingSec = (latestReportCache && latestReportCache._reconnect_interval_sec) || 10;
+              refreshData(false);
+            } else {
+              countdownRemainingSec = sec;
+              refreshData(mode === "DEMO");
+            }
           }
         }, 1000);
       }
@@ -1997,6 +2046,15 @@ INDEX_HTML = r"""<!DOCTYPE html>
       document.getElementById("modeSelect").value = state.mode;
       document.getElementById("underlyingSelect").value = state.underlying;
 
+      if (!latestReportCache) {
+        latestReportCache = {};
+      }
+      latestReportCache._market_open = state.market_open !== false;
+      latestReportCache._market_reason = state.market_reason || "";
+      latestReportCache._live_connected = state.live_connected;
+      latestReportCache._reconnect_attempts = state.reconnect_attempts;
+      latestReportCache._reconnect_interval_sec = state.reconnect_interval_sec;
+
       const badge = document.getElementById("modeBadge");
       const stepBtn = document.getElementById("stepBtn");
       if (state.mode === "DEMO") {
@@ -2006,12 +2064,19 @@ INDEX_HTML = r"""<!DOCTYPE html>
         stepBtn.textContent = `▶ Next Demo Snapshot (${state.demo_step}/${state.demo_total_steps})`;
       } else {
         stepBtn.style.display = "none";
-        if (state.analyze_mode === true) {
+        if (state.live_connected === false || state.is_reconnecting) {
+          badge.className = "badge badge-reconnect";
+          const attempts = state.reconnect_attempts || 1;
+          badge.textContent = `🟡 RECONNECTING (ATTEMPT #${attempts} • RETRY IN ${state.reconnect_interval_sec || 10}s)`;
+          if (countdownRemainingSec > (state.reconnect_interval_sec || 10)) {
+            countdownRemainingSec = state.reconnect_interval_sec || 10;
+          }
+        } else if (state.analyze_mode === true) {
           badge.className = "badge badge-sim";
-          badge.textContent = "OPENALGO ANALYZE MODE (SAFE SIMULATOR)";
+          badge.textContent = "🟢 OPENALGO ANALYZE MODE (SAFE SIMULATOR)";
         } else if (state.analyze_mode === false) {
           badge.className = "badge badge-live";
-          badge.textContent = "OPENALGO LIVE BROKER MODE";
+          badge.textContent = "🟢 OPENALGO LIVE BROKER MODE";
         } else {
           badge.className = "badge badge-demo";
           badge.textContent = "OPENALGO CONNECTING...";
@@ -2021,7 +2086,17 @@ INDEX_HTML = r"""<!DOCTYPE html>
       const errBanner = document.getElementById("errorBanner");
       if (state.error) {
         errBanner.style.display = "block";
-        errBanner.textContent = "OpenAlgo Notice: " + state.error;
+        if (state.mode === "LIVE_OPENALGO" && state.live_connected === false) {
+          errBanner.style.background = "var(--amber-bg)";
+          errBanner.style.borderColor = "var(--amber)";
+          errBanner.style.color = "#fef08a";
+          errBanner.innerHTML = `<strong>⚡ Auto-Reconnect Active:</strong> ${state.error}`;
+        } else {
+          errBanner.style.background = "var(--red-bg)";
+          errBanner.style.borderColor = "var(--red)";
+          errBanner.style.color = "#fecdd3";
+          errBanner.textContent = "OpenAlgo Notice: " + state.error;
+        }
       } else {
         errBanner.style.display = "none";
       }
@@ -2053,17 +2128,16 @@ INDEX_HTML = r"""<!DOCTYPE html>
         }
       }
 
-      const rep = state.report;
-      if (!rep) return;
-      latestReportCache = rep;
-      latestReportCache._market_open = state.market_open !== false;
-      latestReportCache._market_reason = state.market_reason || "";
       if (state.eval_trace) {
         latestReportCache._cycle_id = state.eval_trace.cycle_id;
         latestReportCache._wall_time = state.eval_trace.wall_time;
         renderLogTracer(state.eval_trace);
       }
       updateCountdownLabels();
+
+      const rep = state.report;
+      if (!rep) return;
+      Object.assign(latestReportCache, rep);
 
       // KPI Strip
       const spotDiff = rep.spot_ltp - rep.spot_vwap;
@@ -2539,7 +2613,13 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             if "api_key" in data and data["api_key"]:
                 APP_STATE.api_key = str(data["api_key"]).strip()
             if "mode" in data:
+                old_mode = APP_STATE.mode
                 APP_STATE.mode = str(data["mode"])
+                if APP_STATE.mode == "LIVE_OPENALGO" and old_mode != "LIVE_OPENALGO":
+                    APP_STATE.live_connected = True
+                    APP_STATE.is_reconnecting = False
+                    APP_STATE.reconnect_attempts = 0
+                    APP_STATE.last_disconnect_time = None
             if "underlying" in data and data["underlying"] != APP_STATE.underlying:
                 APP_STATE.underlying = str(data["underlying"])
                 APP_STATE._reset_demo(APP_STATE.underlying)
@@ -2616,20 +2696,55 @@ def _background_auto_poller() -> None:
     and dynamic offline logging (to logs/evaluation_trace_<YYYY-MM-DD>.log, .csv, .jsonl)
     even when no browser tab is open or the browser tab is minimized/throttled.
     Automatically pauses in LIVE_OPENALGO mode outside NSE market hours (09:15–15:30 IST).
+
+    AUTO-RECONNECT RESILIENCE:
+    During power cuts, system restarts, or temporary network drops in LIVE_OPENALGO mode,
+    the background daemon automatically shifts to an aggressive 10-second probing loop
+    checking OpenAlgo health. As soon as OpenAlgo and power return, it seamlessly
+    re-establishes live streaming and logs the recovery without requiring user intervention.
     """
+    last_reconnect_probe = 0.0
     while True:
         time.sleep(2.0)
         try:
+            now = time.time()
+            if APP_STATE.mode == "LIVE_OPENALGO":
+                if not APP_STATE.live_connected:
+                    if now - last_reconnect_probe >= APP_STATE.reconnect_interval_sec:
+                        last_reconnect_probe = now
+                        try:
+                            gateway = OpenAlgoGateway(host=APP_STATE.host, api_key=APP_STATE.api_key)
+                            status_resp = gateway.analyzer_status()
+                            if status_resp.get("status") == "success" or "data" in status_resp:
+                                print(
+                                    f"  [AUTO-RECONNECT] OpenAlgo detected back online at {APP_STATE.host}! "
+                                    f"Resuming live option chain stream..."
+                                )
+                                APP_STATE.step_or_poll(advance_demo=False)
+                        except Exception as probe_err:
+                            with APP_STATE.lock:
+                                APP_STATE.reconnect_attempts += 1
+                                if APP_STATE.last_disconnect_time is None:
+                                    APP_STATE.last_disconnect_time = now
+                                down_sec = int(now - APP_STATE.last_disconnect_time)
+                                down_str = f"{down_sec // 60}m {down_sec % 60}s" if down_sec >= 60 else f"{down_sec}s"
+                                APP_STATE.last_error = (
+                                    f"OpenAlgo offline ({probe_err}). Auto-reconnecting every {APP_STATE.reconnect_interval_sec}s "
+                                    f"(Attempt #{APP_STATE.reconnect_attempts}, offline {down_str})..."
+                                )
+                    continue
+
+                if APP_STATE.last_report is not None:
+                    is_open, _ = check_indian_market_hours()
+                    if not is_open:
+                        continue
+
             interval = APP_STATE.auto_poll_interval_sec
             if interval <= 0:
                 continue
-            if APP_STATE.mode == "LIVE_OPENALGO" and APP_STATE.last_report is not None:
-                is_open, _ = check_indian_market_hours()
-                if not is_open:
-                    continue
             elapsed = time.time() - APP_STATE.last_eval_epoch
             if elapsed >= interval:
-                APP_STATE.step_or_poll(advance_demo=True)
+                APP_STATE.step_or_poll(advance_demo=(APP_STATE.mode == "DEMO"))
         except Exception as exc:
             print(f"  [AUTO-POLLER WARNING] {exc}")
 
